@@ -99,6 +99,11 @@ class StreamHandler[StateT: AgentState](
             logger.info(
                 "Resuming from interrupted state at node '%s'", state.execution_meta.current_node
             )
+            # Save the interrupted node info before clearing so we don't re-interrupt
+            config["_skip_interrupt_at"] = {
+                "node": state.execution_meta.interrupted_node,
+                "status": state.execution_meta.status,
+            }
             # This is a resume case - clear interrupt and merge input data
             if input_data:
                 config["resume_data"] = input_data
@@ -142,6 +147,24 @@ class StreamHandler[StateT: AgentState](
         interrupt_nodes: list[str] = (
             self.interrupt_before if interrupt_type == "before" else self.interrupt_after
         ) or []
+
+        # Check if we just resumed from an interrupt at this node with this type
+        skip_info = config.get("_skip_interrupt_at", {})
+        if skip_info.get("node") == current_node:
+            expected_status = (
+                ExecutionStatus.INTERRUPTED_BEFORE
+                if interrupt_type == "before"
+                else ExecutionStatus.INTERRUPTED_AFTER
+            )
+            if skip_info.get("status") == expected_status:
+                logger.debug(
+                    "Skipping %s interrupt check for node '%s' - just resumed from it",
+                    interrupt_type,
+                    current_node,
+                )
+                # Clear the flag after using it once
+                config.pop("_skip_interrupt_at", None)
+                return False
 
         if current_node in interrupt_nodes:
             status = (
