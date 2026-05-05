@@ -45,6 +45,7 @@ build-backend = "setuptools.build_meta"
 google-genai = ["google-genai>=1.56.0"]
 openai = ["openai>=1.77.0"]
 pg_checkpoint = ["asyncpg>=0.29.0","redis>=4.2"]
+sqlite_checkpoint = ["aiosqlite>=0.19.0"]
 mcp = ["fastmcp>=2.11.3","mcp>=1.13.0"]
 composio = ["composio>=0.8.0"]
 images = ["Pillow>=10.0.0"]
@@ -254,5 +255,6 @@ dev = [
     "mem0ai>=0.1.117",
     "google-genai>=1.56.0",
     "a2a_sdk",
+    "aiosqlite"
 ]
 

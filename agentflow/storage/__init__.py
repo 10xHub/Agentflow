@@ -21,6 +21,7 @@ from .checkpointer import (
     BaseCheckpointer,
     InMemoryCheckpointer,
     PgCheckpointer,
+    SqliteCheckpointer,
 )
 
 # --- Media ---
@@ -127,6 +128,7 @@ __all__ = [
     "ProviderMediaCache",
     "QdrantStore",
     "ReadMode",
+    "SqliteCheckpointer",
     "UserMemoryConfig",
     # Submodules
     "checkpointer",
