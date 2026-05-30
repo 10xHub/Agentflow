@@ -621,6 +621,34 @@ class TestConvertToGoogleFormat:
         tool_content = contents[-1]
         assert tool_content.role == "user"
 
+    def test_parallel_tool_results_merged_into_single_content(self):
+        # Gemini requires the number of function_response parts to equal the
+        # number of function_call parts in the preceding model turn. Parallel
+        # tool calls must therefore collapse into one user Content.
+        agent = _make_google_agent()
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "function": {"name": "fn_a", "arguments": "{}"}},
+                    {"id": "call_2", "function": {"name": "fn_b", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "res_a"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "res_b"},
+        ]
+        types_mock = _build_google_types_mock()
+        with _google_types_patch(types_mock):
+            _, contents = agent._convert_to_google_format(messages)
+        # One model Content (2 function_call parts) + one merged user Content
+        assert len(contents) == 2
+        model_content, tool_content = contents
+        fn_call_parts = [p for p in model_content.parts if p.function_call is not None]
+        assert len(fn_call_parts) == 2
+        assert tool_content.role == "user"
+        assert len(tool_content.parts) == 2
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # AgentGoogleMixin – _convert_tools_to_google_format

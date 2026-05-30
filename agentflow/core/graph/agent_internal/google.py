@@ -34,19 +34,41 @@ class AgentGoogleMixin:
                 if tool_call_id and function_name:
                     call_id_to_name[tool_call_id] = function_name
 
+        pending_tool_parts: list = []
+
+        def flush_tool_parts() -> None:
+            # Gemini requires the number of function_response parts in a user
+            # turn to equal the number of function_call parts in the preceding
+            # model turn. Parallel tool calls produce one model Content with N
+            # function_call parts, so all consecutive tool results must be
+            # merged into a single user Content with N function_response parts.
+            if pending_tool_parts:
+                from google.genai import types
+
+                google_contents.append(types.Content(role="user", parts=list(pending_tool_parts)))
+                pending_tool_parts.clear()
+
         for message in messages:
             role = message.get("role", "user")
             content = message.get("content", "")
+
+            if role == "tool":
+                pending_tool_parts.append(
+                    self._build_tool_response_part(message, content, call_id_to_name)
+                )
+                continue
+
+            flush_tool_parts()
 
             if role == "system":
                 system_instruction = self._handle_system_message(content, system_instruction)
             elif role == "assistant" and message.get("tool_calls"):
                 google_contents.append(self._handle_assistant_with_tools(message))
-            elif role == "tool":
-                google_contents.append(self._handle_tool_message(message, content, call_id_to_name))
             else:
                 google_role = "model" if role == "assistant" else "user"
                 google_contents.append(self._handle_regular_message(content, google_role))
+
+        flush_tool_parts()
 
         return system_instruction, google_contents
 
@@ -107,10 +129,10 @@ class AgentGoogleMixin:
         else:
             part.thought_signature = b"skip_thought_signature_validator"
 
-    def _handle_tool_message(
+    def _build_tool_response_part(
         self, message: dict[str, Any], content: Any, call_id_to_name: dict[str, str]
     ) -> Any:
-        """Handle tool role message."""
+        """Build a single FunctionResponse Part from a tool role message."""
         from google.genai import types
 
         tool_call_id = message.get("tool_call_id", "")
@@ -118,14 +140,9 @@ class AgentGoogleMixin:
             tool_call_id,
             message.get("name", "") or tool_call_id or "unknown_function",
         )
-        return types.Content(
-            role="user",
-            parts=[
-                types.Part.from_function_response(
-                    name=function_name,
-                    response={"result": str(content) if content else ""},
-                )
-            ],
+        return types.Part.from_function_response(
+            name=function_name,
+            response={"result": str(content) if content else ""},
         )
 
     def _handle_regular_message(self, content: Any, role: str) -> Any:
