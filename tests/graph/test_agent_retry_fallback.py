@@ -229,6 +229,23 @@ class TestExtractStatusCode:
         exc = Exception("Rate limited: 429 Too Many Requests")
         assert agent._extract_status_code(exc) == 429
 
+    def test_non_integer_code_returns_none(self):
+        agent = _make_agent()
+        exc = Exception("some error")
+        exc.code = "UNKNOWN"
+        assert agent._extract_status_code(exc) is None
+
+    def test_none_code_returns_none(self):
+        agent = _make_agent()
+        exc = Exception("some error")
+        exc.code = None
+        assert agent._extract_status_code(exc) is None
+
+    def test_string_with_no_code_returns_none(self):
+        agent = _make_agent()
+        exc = Exception("Something went wrong without a status code")
+        assert agent._extract_status_code(exc) is None
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # _is_retryable_error

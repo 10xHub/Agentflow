@@ -30,6 +30,18 @@ from agentflow.storage.store.memory_config import (
 )
 from agentflow.storage.store.store_schema import MemorySearchResult, MemoryType
 
+from agentflow.core.graph.agent_internal.execution import (
+    _extract_cache_creation_tokens,
+    _extract_cache_read_tokens,
+    _extract_finish_reason,
+    _extract_input_tokens,
+    _extract_output_tokens,
+    _extract_reasoning_tokens,
+    _extract_response_id,
+    _extract_response_model,
+    _extract_response_text,
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared helpers
@@ -361,6 +373,210 @@ class TestExtractPrompt:
         agent = _make_openai_agent()
         messages = [{"role": "user", "content": ""}]
         assert agent._extract_prompt(messages) == ""
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Token / response extraction helpers
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestExtractInputTokens:
+    def test_no_usage_returns_zero(self):
+        assert _extract_input_tokens(SimpleNamespace()) == 0
+
+    def test_prompt_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=42))
+        assert _extract_input_tokens(resp) == 42
+
+    def test_input_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(input_tokens=99))
+        assert _extract_input_tokens(resp) == 99
+
+    def test_prompt_tokens_preferred_over_input_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=10, input_tokens=20))
+        assert _extract_input_tokens(resp) == 10
+
+
+class TestExtractOutputTokens:
+    def test_no_usage_returns_zero(self):
+        assert _extract_output_tokens(SimpleNamespace()) == 0
+
+    def test_completion_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(completion_tokens=42))
+        assert _extract_output_tokens(resp) == 42
+
+    def test_output_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(output_tokens=99))
+        assert _extract_output_tokens(resp) == 99
+
+    def test_completion_tokens_preferred_over_output_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(completion_tokens=10, output_tokens=20))
+        assert _extract_output_tokens(resp) == 10
+
+
+class TestExtractCacheReadTokens:
+    def test_no_usage_returns_zero(self):
+        assert _extract_cache_read_tokens(SimpleNamespace()) == 0
+
+    def test_anthropic_cache_read(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(cache_read_input_tokens=100))
+        assert _extract_cache_read_tokens(resp) == 100
+
+    def test_openai_chat_cached_tokens(self):
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens_details=SimpleNamespace(cached_tokens=50)),
+        )
+        assert _extract_cache_read_tokens(resp) == 50
+
+    def test_openai_responses_cached_tokens(self):
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(input_tokens_details=SimpleNamespace(cached_tokens=75)),
+        )
+        assert _extract_cache_read_tokens(resp) == 75
+
+    def test_google_cached_content_token_count(self):
+        # Google responses have both usage (no cache fields) and usage_metadata
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=10),
+            usage_metadata=SimpleNamespace(cached_content_token_count=200),
+        )
+        assert _extract_cache_read_tokens(resp) == 200
+
+    def test_no_cache_hits_returns_zero(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=5, completion_tokens=10))
+        assert _extract_cache_read_tokens(resp) == 0
+
+    def test_cache_value_zero_returns_zero(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(cache_read_input_tokens=0))
+        assert _extract_cache_read_tokens(resp) == 0
+
+
+class TestExtractCacheCreationTokens:
+    def test_no_usage_returns_zero(self):
+        assert _extract_cache_creation_tokens(SimpleNamespace()) == 0
+
+    def test_cache_creation_tokens(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(cache_creation_input_tokens=50))
+        assert _extract_cache_creation_tokens(resp) == 50
+
+    def test_cache_creation_none_returns_zero(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(cache_creation_input_tokens=None))
+        assert _extract_cache_creation_tokens(resp) == 0
+
+    def test_cache_creation_zero_returns_zero(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(cache_creation_input_tokens=0))
+        assert _extract_cache_creation_tokens(resp) == 0
+
+
+class TestExtractReasoningTokens:
+    def test_no_usage_returns_zero(self):
+        assert _extract_reasoning_tokens(SimpleNamespace()) == 0
+
+    def test_openai_completion_details(self):
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(completion_tokens_details=SimpleNamespace(reasoning_tokens=42)),
+        )
+        assert _extract_reasoning_tokens(resp) == 42
+
+    def test_openai_responses_output_details(self):
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(output_tokens_details=SimpleNamespace(reasoning_tokens=77)),
+        )
+        assert _extract_reasoning_tokens(resp) == 77
+
+    def test_google_thoughts_token_count(self):
+        # Google responses have both usage and usage_metadata
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(completion_tokens=10),
+            usage_metadata=SimpleNamespace(thoughts_token_count=120),
+        )
+        assert _extract_reasoning_tokens(resp) == 120
+
+    def test_no_reasoning_tokens_returns_zero(self):
+        resp = SimpleNamespace(usage=SimpleNamespace(completion_tokens=10))
+        assert _extract_reasoning_tokens(resp) == 0
+
+
+class TestExtractFinishReason:
+    def test_openai_chat_choices_finish_reason(self):
+        resp = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop")])
+        assert _extract_finish_reason(resp) == "stop"
+
+    def test_openai_responses_status(self):
+        resp = SimpleNamespace(status="completed")
+        assert _extract_finish_reason(resp) == "completed"
+
+    def test_status_in_progress_is_skipped(self):
+        resp = SimpleNamespace(status="in_progress")
+        assert _extract_finish_reason(resp) == ""
+
+    def test_anthropic_stop_reason(self):
+        resp = SimpleNamespace(stop_reason="end_turn")
+        assert _extract_finish_reason(resp) == "end_turn"
+
+    def test_google_candidates_finish_reason_with_name(self):
+        resp = SimpleNamespace(
+            candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name="STOP"))],
+        )
+        assert _extract_finish_reason(resp) == "STOP"
+
+    def test_google_candidates_int_finish_reason(self):
+        resp = SimpleNamespace(candidates=[SimpleNamespace(finish_reason=1)])
+        assert _extract_finish_reason(resp) == "1"
+
+    def test_no_match_returns_empty(self):
+        assert _extract_finish_reason(SimpleNamespace()) == ""
+
+    def test_empty_status_string_skipped(self):
+        resp = SimpleNamespace(status="")
+        assert _extract_finish_reason(resp) == ""
+
+
+class TestExtractResponseId:
+    def test_with_id(self):
+        resp = SimpleNamespace(id="chatcmpl-abc123")
+        assert _extract_response_id(resp) == "chatcmpl-abc123"
+
+    def test_no_id_returns_empty(self):
+        assert _extract_response_id(SimpleNamespace()) == ""
+
+
+class TestExtractResponseModel:
+    def test_with_model(self):
+        resp = SimpleNamespace(model="gpt-4o")
+        assert _extract_response_model(resp) == "gpt-4o"
+
+    def test_no_model_returns_empty(self):
+        assert _extract_response_model(SimpleNamespace()) == ""
+
+
+class TestExtractResponseText:
+    def test_text_attribute(self):
+        resp = SimpleNamespace(text="  Hello world  ")
+        assert _extract_response_text(resp) == "Hello world"
+
+    def test_output_text_attribute(self):
+        resp = SimpleNamespace(output_text="  Hi there  ")
+        assert _extract_response_text(resp) == "Hi there"
+
+    def test_choices_content(self):
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="From choice"))])
+        assert _extract_response_text(resp) == "From choice"
+
+    def test_no_text_found_returns_empty(self):
+        assert _extract_response_text(SimpleNamespace()) == ""
+
+    def test_text_preferred_over_choices(self):
+        resp = SimpleNamespace(text="Direct", choices=[SimpleNamespace(message=SimpleNamespace(content="Choice"))])
+        assert _extract_response_text(resp) == "Direct"
+
+    def test_output_text_preferred_over_choices(self):
+        resp = SimpleNamespace(output_text="Output", choices=[SimpleNamespace(message=SimpleNamespace(content="Choice"))])
+        assert _extract_response_text(resp) == "Output"
+
+    def test_choices_empty_content_returns_empty(self):
+        resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=""))])
+        assert _extract_response_text(resp) == ""
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1015,6 +1231,118 @@ class TestCallGoogle:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# AgentExecutionMixin – _call_llm (provider routing)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestCallLLM:
+    async def test_openai_chat_style(self):
+        agent = _make_openai_agent(api_style="chat")
+        agent._call_openai = AsyncMock(return_value="chat_response")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "chat_response"
+        assert agent._effective_api_style == "chat"
+        agent._call_openai.assert_awaited_once()
+
+    async def test_openai_responses_style(self):
+        agent = _make_openai_agent(api_style="responses", model="o4-mini")
+        agent._call_openai_responses = AsyncMock(return_value="resp_response")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "resp_response"
+        assert agent._effective_api_style == "responses"
+        agent._call_openai_responses.assert_awaited_once()
+
+    async def test_openai_responses_with_output_schema_falls_back_to_chat(self):
+        agent = _make_openai_agent(api_style="responses", model="o4-mini", output_schema={"type": "object", "properties": {"answer": {"type": "string"}}})
+        agent._call_openai = AsyncMock(return_value="chat_response")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "chat_response"
+        assert agent._effective_api_style == "chat"
+        agent._call_openai.assert_awaited_once()
+
+    async def test_openai_responses_with_base_url_succeeds(self):
+        agent = _make_openai_agent(api_style="responses", model="o4-mini", base_url="http://localhost:8000/v1")
+        agent._call_openai_responses = AsyncMock(return_value="resp_response")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "resp_response"
+        assert agent._effective_api_style == "responses"
+        agent._call_openai_responses.assert_awaited_once()
+
+    async def test_openai_responses_with_base_url_fallback_on_error(self):
+        agent = _make_openai_agent(api_style="responses", model="o4-mini", base_url="http://localhost:8000/v1")
+        agent._call_openai_responses = AsyncMock(side_effect=Exception("not supported"))
+        agent._call_openai = AsyncMock(return_value="fallback_chat")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "fallback_chat"
+        assert agent._effective_api_style == "chat"
+        agent._call_openai_responses.assert_awaited_once()
+        agent._call_openai.assert_awaited_once()
+
+    async def test_openai_chat_with_reasoning_effort(self):
+        agent = _make_openai_agent(api_style="chat", reasoning_config={"effort": "high"})
+        agent._call_openai = AsyncMock(return_value="response")
+        await agent._call_llm([{"role": "user", "content": "hi"}])
+        call_kwargs = agent._call_openai.call_args[1]
+        assert call_kwargs.get("reasoning_effort") == "high"
+
+    async def test_openai_chat_with_reasoning_config_and_base_url(self):
+        agent = _make_openai_agent(api_style="chat", reasoning_config={"effort": "medium"}, base_url="http://localhost:8000/v1")
+        agent._call_openai = AsyncMock(return_value="response")
+        await agent._call_llm([{"role": "user", "content": "hi"}])
+        call_kwargs = agent._call_openai.call_args[1]
+        extra_body = call_kwargs.get("extra_body", {})
+        assert "reasoning" in extra_body
+        assert extra_body["reasoning"] == {"effort": "medium"}
+
+    async def test_google_provider(self):
+        agent = _make_google_agent()
+        agent._call_google = AsyncMock(return_value="google_response")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "google_response"
+        agent._call_google.assert_awaited_once()
+
+    async def test_unsupported_provider_raises(self):
+        agent = _make_openai_agent()
+        agent.provider = "unsupported"
+        with pytest.raises(ValueError, match="Unsupported provider"):
+            await agent._call_llm([{"role": "user", "content": "hi"}])
+
+    async def test_openai_responses_output_schema_with_reasoning_and_base_url(self):
+        """Cover lines 406-410: output_schema + reasoning_config + base_url."""
+        agent = _make_openai_agent(
+            api_style="responses",
+            model="o4-mini",
+            output_schema={"type": "object", "properties": {"a": {"type": "string"}}},
+            reasoning_config={"effort": "high"},
+            base_url="http://localhost:8000/v1",
+        )
+        agent._call_openai = AsyncMock(return_value="chat_result")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "chat_result"
+        assert agent._effective_api_style == "chat"
+        call_kwargs = agent._call_openai.call_args[1]
+        assert call_kwargs.get("reasoning_effort") == "high"
+        extra_body = call_kwargs.get("extra_body", {})
+        assert extra_body.get("reasoning") == {"effort": "high"}
+
+    async def test_openai_responses_base_url_fallback_with_reasoning(self):
+        """Cover line 429: reasoning_effort in base_url fallback path."""
+        agent = _make_openai_agent(
+            api_style="responses",
+            model="o4-mini",
+            reasoning_config={"effort": "low"},
+            base_url="http://localhost:8000/v1",
+        )
+        agent._call_openai_responses = AsyncMock(side_effect=Exception("fail"))
+        agent._call_openai = AsyncMock(return_value="fallback")
+        result = await agent._call_llm([{"role": "user", "content": "hi"}])
+        assert result == "fallback"
+        call_kwargs = agent._call_openai.call_args[1]
+        assert call_kwargs.get("reasoning_effort") == "low"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # AgentExecutionMixin – _setup_tools
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1186,6 +1514,413 @@ class TestResolveTools:
         names_second = [t["function"]["name"] for t in second]
         assert names_first.count("my_tool") == 1
         assert names_second.count("my_tool") == 1
+
+    async def test_named_node_not_found_raises(self):
+        """container.call_factory returning None should raise RuntimeError."""
+        agent = _make_openai_agent(tool_node="MISSING")
+        agent._tool_node = None
+        agent.tool_node_name = "MISSING"
+
+        container = MagicMock()
+        container.call_factory.return_value = None
+
+        with pytest.raises(RuntimeError, match="ToolNode named 'MISSING' was not found"):
+            await agent._resolve_tools(container)
+
+    async def test_named_node_not_tool_node_raises(self):
+        """Resolved node whose func is not a ToolNode should raise."""
+        agent = _make_openai_agent(tool_node="NOT_TOOL")
+        agent._tool_node = None
+        agent.tool_node_name = "NOT_TOOL"
+
+        fake_node = MagicMock()
+        fake_node.func = "not_a_tool_node"  # not a ToolNode instance
+
+        container = MagicMock()
+        container.call_factory.return_value = fake_node
+
+        with pytest.raises(RuntimeError, match="not a ToolNode"):
+            await agent._resolve_tools(container)
+
+    async def test_named_node_key_error_raises(self):
+        """Cover lines 719-720: container.call_factory raises KeyError."""
+        from injectq.utils.exceptions import DependencyNotFoundError
+
+        agent = _make_openai_agent(tool_node="MISSING")
+        agent._tool_node = None
+        agent.tool_node_name = "MISSING"
+
+        container = MagicMock()
+        container.call_factory.side_effect = KeyError("get_node")
+
+        with pytest.raises(RuntimeError, match="ToolNode named 'MISSING' was not found"):
+            await agent._resolve_tools(container)
+
+    async def test_named_node_dependency_not_found_raises(self):
+        """Cover lines 719-720: container.call_factory raises DependencyNotFoundError."""
+        from injectq.utils.exceptions import DependencyNotFoundError
+
+        agent = _make_openai_agent(tool_node="MISSING")
+        agent._tool_node = None
+        agent.tool_node_name = "MISSING"
+
+        container = MagicMock()
+        container.call_factory.side_effect = DependencyNotFoundError("get_node")
+
+        with pytest.raises(RuntimeError, match="ToolNode named 'MISSING' was not found"):
+            await agent._resolve_tools(container)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AgentExecutionMixin – _resolve_media_in_messages
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestResolveMediaInMessages:
+    async def test_no_media_store_returns_messages_unchanged(self):
+        agent = _make_openai_agent()
+        agent.media_store = None
+        messages = [{"role": "user", "content": "hello"}]
+        result = await agent._resolve_media_in_messages(messages)
+        assert result is messages
+
+    async def test_non_list_content_skipped(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        messages = [{"role": "user", "content": "plain text"}]
+        result = await agent._resolve_media_in_messages(messages)
+        assert result is messages
+
+    async def test_non_agentflow_url_not_touched(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}]}]
+        result = await agent._resolve_media_in_messages(messages)
+        assert result[0]["content"][0]["image_url"]["url"] == "https://example.com/img.png"
+
+    async def test_openai_image_ref_resolved(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gpt-4o"
+        agent.provider = "openai"
+
+        resolved = {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}}
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_openai = AsyncMock(return_value=resolved)
+
+        messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "agentflow://media/img_1", "mime_type": "image/png"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        assert result[0]["content"][0] is resolved
+        mock_resolver.resolve_for_openai.assert_awaited_once()
+
+    async def test_google_image_ref_with_inline_data(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gemini-2.0-flash"
+        agent.provider = "google"
+
+        resolved = SimpleNamespace(
+            inline_data=SimpleNamespace(
+                data=b"\x89PNG\r\n\x1a\n",
+                mime_type="image/png",
+            ),
+        )
+
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_google = AsyncMock(return_value=resolved)
+
+        messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "agentflow://media/img_g", "mime_type": "image/png"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        content = result[0]["content"][0]
+        assert content["type"] == "image_url"
+        assert content["image_url"]["url"].startswith("data:image/png;base64,")
+
+    async def test_google_image_ref_with_file_data(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gemini-2.0-flash"
+        agent.provider = "google"
+
+        resolved = SimpleNamespace(
+            file_data=SimpleNamespace(file_uri="https://storage.googleapis.com/bucket/file"),
+        )
+
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_google = AsyncMock(return_value=resolved)
+
+        messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "agentflow://media/img_fd", "mime_type": "image/png"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        content = result[0]["content"][0]
+        assert content["type"] == "image_url"
+        assert content["image_url"]["url"] == "https://storage.googleapis.com/bucket/file"
+
+    async def test_google_image_ref_resolve_failure_logged(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gemini-2.0-flash"
+        agent.provider = "google"
+
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_google = AsyncMock(side_effect=ValueError("API error"))
+
+        messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "agentflow://media/img_fail", "mime_type": "image/png"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        # Content unchanged on error
+        assert result[0]["content"][0]["image_url"]["url"] == "agentflow://media/img_fail"
+
+    async def test_model_with_provider_prefix_stripped(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "openai/gpt-4o"
+        agent.provider = "openai"
+
+        resolved = {"type": "image_url", "image_url": {"url": "data:...;base64,xyz"}}
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_openai = AsyncMock(return_value=resolved)
+
+        messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "agentflow://media/img_pfx", "mime_type": "image/png"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            await agent._resolve_media_in_messages(messages)
+
+        # Model passed to resolver should not have the prefix
+        call_model = mock_resolver.resolve_for_openai.call_args[1].get("model")
+        assert call_model == "gpt-4o"
+        assert call_model != "openai/gpt-4o"
+
+    async def test_document_type_openai_resolved(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gpt-4o"
+        agent.provider = "openai"
+
+        resolved = {"image_url": {"url": "data:application/pdf;base64,pdfdata"}}
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_openai = AsyncMock(return_value=resolved)
+
+        messages = [{"role": "user", "content": [{"type": "document", "document": {"url": "agentflow://media/doc_1", "mime_type": "application/pdf"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        content = result[0]["content"][0]
+        assert content["type"] == "document"
+        assert content["document"]["url"] == "data:application/pdf;base64,pdfdata"
+
+    async def test_video_type_google_resolved(self):
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gemini-2.0-flash"
+        agent.provider = "google"
+
+        resolved = SimpleNamespace(
+            inline_data=SimpleNamespace(
+                data=b"videodata",
+                mime_type="video/mp4",
+            ),
+        )
+
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_google = AsyncMock(return_value=resolved)
+
+        messages = [{"role": "user", "content": [{"type": "video", "video": {"url": "agentflow://media/vid_1", "mime_type": "video/mp4"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        content = result[0]["content"][0]
+        assert content["type"] == "video"
+        assert content["video"]["mime_type"] == "video/mp4"
+
+    async def test_media_store_from_container_when_not_on_self(self):
+        agent = _make_openai_agent()
+        # Remove media_store from agent so it falls back to container lookup
+        if hasattr(agent, "media_store"):
+            del agent.media_store
+
+        mock_media_store = MagicMock()
+        messages = [{"role": "user", "content": "hello"}]
+
+        with patch("agentflow.core.graph.agent_internal.execution.InjectQ") as mock_injectq:
+            instance = mock_injectq.get_instance.return_value
+            instance.try_get.side_effect = lambda key: mock_media_store if key == "media_store" else None
+            result = await agent._resolve_media_in_messages(messages)
+
+        assert result is messages  # no agentflow refs, so unchanged
+
+    async def test_non_dict_part_skipped(self):
+        """Cover line 595: part in content list is not a dict -> continue."""
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        messages = [{"role": "user", "content": ["not_a_dict", {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}]}]
+        result = await agent._resolve_media_in_messages(messages)
+        # Non-dict parts passed through unchanged
+        assert result[0]["content"][0] == "not_a_dict"
+
+    async def test_document_type_openai_resolve_failure(self):
+        """Cover lines 696-697: exception during document/video resolve."""
+        agent = _make_openai_agent()
+        agent.media_store = MagicMock()
+        agent.model = "gpt-4o"
+        agent.provider = "openai"
+
+        mock_resolver = AsyncMock()
+        mock_resolver.resolve_for_openai = AsyncMock(side_effect=ValueError("doc resolve error"))
+
+        messages = [{"role": "user", "content": [{"type": "document", "document": {"url": "agentflow://media/doc_fail", "mime_type": "application/pdf"}}]}]
+
+        with patch("agentflow.storage.media.resolver.MediaRefResolver", return_value=mock_resolver):
+            result = await agent._resolve_media_in_messages(messages)
+
+        assert result[0]["content"][0]["document"]["url"] == "agentflow://media/doc_fail"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AgentExecutionMixin – execute
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestExecute:
+    async def test_basic_execute_text(self):
+        agent = _make_openai_agent()
+        state = AgentState()
+        config = {"_node_name": "AGENT", "is_stream": False}
+
+        mock_response = SimpleNamespace(
+            id="resp_1",
+            model="gpt-4o",
+            text="Hello world",
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=20),
+        )
+
+        agent._trim_context = AsyncMock(return_value=state)
+        agent._resolve_media_in_messages = AsyncMock(side_effect=lambda msgs: msgs)
+        agent._resolve_tools = AsyncMock(return_value=[])
+        agent._call_llm_with_retry = AsyncMock(return_value=mock_response)
+        agent._build_skill_prompts = MagicMock(return_value=[])
+        agent._build_memory_prompts = AsyncMock(return_value=[])
+
+        with patch("agentflow.core.graph.agent_internal.execution.convert_messages", return_value=[{"role": "user", "content": "hi"}]), \
+             patch("agentflow.core.graph.agent_internal.execution.strip_media_blocks", side_effect=lambda msgs: msgs), \
+             patch("agentflow.runtime.publisher.publish.publish_event") as mock_publish, \
+             patch("agentflow.core.graph.agent_internal.execution.ModelResponseConverter") as mock_converter:
+
+            mock_converter_instance = MagicMock()
+            mock_converter.return_value = mock_converter_instance
+
+            result = await agent.execute(state, config)
+
+        assert result is mock_converter_instance
+        agent._call_llm_with_retry.assert_awaited_once_with(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            stream=False,
+        )
+        mock_converter.assert_called_once()
+        assert mock_converter.call_args.args[0] is mock_response
+        assert mock_converter.call_args.kwargs.get("converter") is not None
+        # START + END events published
+        assert mock_publish.call_count >= 2
+
+    async def test_execute_stream_no_end_event(self):
+        agent = _make_openai_agent()
+        state = AgentState()
+        config = {"_node_name": "AGENT", "is_stream": True}
+
+        mock_response = MagicMock()
+        agent._trim_context = AsyncMock(return_value=state)
+        agent._resolve_media_in_messages = AsyncMock(side_effect=lambda msgs: msgs)
+        agent._resolve_tools = AsyncMock(return_value=[])
+        agent._call_llm_with_retry = AsyncMock(return_value=mock_response)
+        agent._build_skill_prompts = MagicMock(return_value=[])
+        agent._build_memory_prompts = AsyncMock(return_value=[])
+
+        with patch("agentflow.core.graph.agent_internal.execution.convert_messages", return_value=[]), \
+             patch("agentflow.core.graph.agent_internal.execution.strip_media_blocks", side_effect=lambda msgs: msgs), \
+             patch("agentflow.runtime.publisher.publish.publish_event") as mock_publish, \
+             patch("agentflow.core.graph.agent_internal.execution.ModelResponseConverter") as mock_converter:
+
+            await agent.execute(state, config)
+
+        # Only START event — no END event for streams
+        assert mock_publish.call_count == 1
+
+    async def test_execute_with_multimodal_config_skips_strip(self):
+        agent = _make_openai_agent(multimodal_config=MagicMock())
+        state = AgentState()
+        config = {"_node_name": "AGENT", "is_stream": False}
+
+        mock_response = SimpleNamespace(
+            id="r1", model="gpt-4o", text="ok",
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+        )
+
+        agent._trim_context = AsyncMock(return_value=state)
+        agent._resolve_media_in_messages = AsyncMock(side_effect=lambda msgs: msgs)
+        agent._resolve_tools = AsyncMock(return_value=[])
+        agent._call_llm_with_retry = AsyncMock(return_value=mock_response)
+
+        strip_called = []
+
+        def tracking_strip(msgs):
+            strip_called.append(True)
+            return msgs
+
+        with patch("agentflow.core.graph.agent_internal.execution.convert_messages", return_value=[]), \
+             patch("agentflow.core.graph.agent_internal.execution.strip_media_blocks", side_effect=tracking_strip), \
+             patch("agentflow.runtime.publisher.publish.publish_event"), \
+             patch("agentflow.core.graph.agent_internal.execution.ModelResponseConverter"):
+
+            await agent.execute(state, config)
+
+        # strip_media_blocks should NOT be called when multimodal_config is set
+        assert len(strip_called) == 0
+
+    async def test_execute_with_tools(self):
+        agent = _make_openai_agent()
+        state = AgentState()
+        config = {"_node_name": "AGENT", "is_stream": False}
+
+        mock_response = SimpleNamespace(
+            id="r2", model="gpt-4o", text="tool result",
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=15),
+        )
+
+        fake_tools = [{"function": {"name": "my_tool"}}]
+
+        agent._trim_context = AsyncMock(return_value=state)
+        agent._resolve_media_in_messages = AsyncMock(side_effect=lambda msgs: msgs)
+        agent._resolve_tools = AsyncMock(return_value=fake_tools)
+        agent._call_llm_with_retry = AsyncMock(return_value=mock_response)
+        agent._build_skill_prompts = MagicMock(return_value=[])
+        agent._build_memory_prompts = AsyncMock(return_value=[])
+
+        with patch("agentflow.core.graph.agent_internal.execution.convert_messages", return_value=[]), \
+             patch("agentflow.core.graph.agent_internal.execution.strip_media_blocks", side_effect=lambda msgs: msgs), \
+             patch("agentflow.runtime.publisher.publish.publish_event"), \
+             patch("agentflow.core.graph.agent_internal.execution.ModelResponseConverter"):
+
+            await agent.execute(state, config)
+
+        agent._call_llm_with_retry.assert_awaited_once_with(
+            messages=[],
+            tools=fake_tools,
+            stream=False,
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -237,3 +237,58 @@ class TestQuickTestExtractResponse:
         ]
         result = QuickTest._extract_response({"messages": msgs})
         assert result == "final response"
+
+    @pytest.mark.asyncio
+    async def test_with_tools_actual_execution(self):
+        """Test QuickTest.with_tools actual execution route."""
+        # This will call QuickTest.with_tools, which routes through ToolNode
+        result = await QuickTest.with_tools(
+            query="Tell me the weather in SF",
+            response="The weather in SF is sunny",
+            tools=["get_weather"],
+            tool_responses={"get_weather": "sunny"}
+        )
+        assert result is not None
+        assert result.final_response == "The weather in SF is sunny"
+        assert len(result.tool_calls) > 0
+        assert result.tool_calls[0]["name"] == "get_weather"
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_fallback_no_state_context(self):
+        """Test multi_turn fallback when state context is not present."""
+        # We can mock compiled.ainvoke to return a dict without state context
+        # to hit line 150 of quick_test.py
+        from agentflow.core.graph.compiled_graph import CompiledGraph
+        from agentflow.core.state import Message
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_compiled = MagicMock(spec=CompiledGraph)
+        mock_compiled.ainvoke = AsyncMock(return_value={
+            "messages": [Message.text_message("User message", role="user"), Message.text_message("Response", role="assistant")]
+        })
+
+        with patch("agentflow.core.graph.StateGraph.compile", return_value=mock_compiled):
+            result = await QuickTest.multi_turn(
+                conversation=[("User message", "Response")]
+            )
+            assert result.final_response == "Response"
+            assert len(result.messages) == 2
+
+    def test_extract_response_no_text_method_fallback(self):
+        """Test extract response fallback when message text attribute is not a method/callable."""
+        # Create a mock message where hasattr(msg, "text") is False but hasattr(msg, "content") is True
+        msg = type("MockMsg", (), {
+            "role": "assistant",
+            "content": "Fall back to content string"
+        })
+        result = QuickTest._extract_response({"messages": [msg]})
+        assert result == "Fall back to content string"
+
+        # Create a mock message where msg has no content but has role
+        msg2 = type("MockMsg", (), {
+            "role": "assistant"
+        })
+        result = QuickTest._extract_response({"messages": [msg2]})
+        # str(msg2) is returned
+        assert "MockMsg" in result
+

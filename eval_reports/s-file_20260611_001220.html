@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>s-file</title>
+    <style>
+
+/* ── Theme variables ────────────────────────────────────────────────────── */
+:root {
+    --color-pass: #22c55e;
+    --color-fail: #ef4444;
+    --color-warn: #f59e0b;
+    --color-bg: #f8fafc;
+    --color-card: #ffffff;
+    --color-border: #e2e8f0;
+    --color-text: #1e293b;
+    --color-muted: #64748b;
+    --color-header-bg: #ffffff;
+    --color-bg-muted: #f3f4f6;
+    --color-accent: #6366f1;
+}
+
+[data-theme="dark"] {
+    --color-pass: #4ade80;
+    --color-fail: #f87171;
+    --color-warn: #fbbf24;
+    --color-bg: #0f172a;
+    --color-card: #1e293b;
+    --color-border: #334155;
+    --color-text: #f1f5f9;
+    --color-muted: #94a3b8;
+    --color-header-bg: #1e293b;
+    --color-bg-muted: #0f172a;
+    --color-accent: #818cf8;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+        --color-pass: #4ade80;
+        --color-fail: #f87171;
+        --color-warn: #fbbf24;
+        --color-bg: #0f172a;
+        --color-card: #1e293b;
+        --color-border: #334155;
+        --color-text: #f1f5f9;
+        --color-muted: #94a3b8;
+        --color-header-bg: #1e293b;
+        --color-bg-muted: #0f172a;
+        --color-accent: #818cf8;
+    }
+}
+
+/* ── Reset ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 Oxygen, Ubuntu, sans-serif;
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    line-height: 1.6;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 0 1.5rem 2rem; }
+
+/* ── Sticky header ──────────────────────────────────────────────────────── */
+.sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--color-header-bg);
+    border-bottom: 1px solid var(--color-border);
+    padding: 0.65rem 1.5rem;
+    margin: 0 -1.5rem 1.5rem;
+    box-shadow: 0 1px 8px rgb(0 0 0 / 0.07);
+}
+
+.header-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+/* ── Brand area ─────────────────────────────────────────────────────────── */
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+}
+
+.brand-logo {
+    font-size: 1.6rem;
+    line-height: 1;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    flex-shrink: 0;
+}
+
+.brand-text {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    flex-shrink: 0;
+}
+
+.brand-name {
+    font-size: 1.1rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.02em;
+}
+
+.brand-sub {
+    font-size: 0.6rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--color-muted);
+}
+
+.report-title-chip {
+    display: inline-block;
+    padding: 0.2rem 0.6rem;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--color-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+
+.header-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-shrink: 0;
+}
+
+.timestamp { color: var(--color-muted); font-size: 0.8rem; }
+
+.header-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.65rem;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    background: var(--color-card);
+    color: var(--color-text);
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 500;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+}
+.header-link:hover {
+    background: #6366f1;
+    border-color: #6366f1;
+    color: #fff;
+}
+
+.theme-btn {
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    color: var(--color-text);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    transition: background 0.2s;
+}
+.theme-btn:hover { background: var(--color-bg); }
+
+/* ── Summary stat cards ─────────────────────────────────────────────────── */
+.summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.stat-card {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 1.1rem 1rem;
+    text-align: center;
+    transition: box-shadow 0.2s, transform 0.2s;
+}
+.stat-card:hover {
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.1);
+    transform: translateY(-2px);
+}
+
+.stat-icon { font-size: 1.25rem; margin-bottom: 0.25rem; line-height: 1; }
+.stat-value { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; }
+.stat-label { color: var(--color-muted); font-size: 0.8rem; font-weight: 500; margin-top: 0.1rem; }
+.stat-pass .stat-value { color: var(--color-pass); }
+.stat-fail .stat-value { color: var(--color-fail); }
+.stat-warn .stat-value { color: var(--color-warn); }
+.stat-rate .stat-value {
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.progress-bar {
+    background: var(--color-border);
+    border-radius: 999px;
+    height: 6px;
+    margin-top: 0.6rem;
+    overflow: hidden;
+}
+
+.progress-fill {
+    background: linear-gradient(90deg, #6366f1, #8b5cf6);
+    height: 100%;
+    transition: width 0.4s ease;
+    border-radius: 999px;
+}
+
+/* ── Chart panels ───────────────────────────────────────────────────────── */
+.charts-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+@media (max-width: 640px) {
+    .charts-section { grid-template-columns: 1fr; }
+}
+
+.chart-panel {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    padding: 1.1rem;
+    min-height: 100px;
+    overflow: hidden;
+    box-shadow: 0 1px 4px rgb(0 0 0 / 0.05);
+}
+
+.chart-panel h2 {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--color-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.875rem;
+}
+
+.chart-svg { display: block; width: 100%; overflow: visible; }
+.chart-label { font-size: 11px; fill: var(--color-text); font-family: inherit; }
+.chart-val   { font-size: 11px; fill: var(--color-muted); font-family: inherit; }
+
+/* ── Filter bar (sticky below header) ──────────────────────────────────── */
+.cases-section { margin-bottom: 2rem; }
+
+.filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+    position: sticky;
+    top: 57px;
+    z-index: 50;
+    background: var(--color-bg);
+    padding: 0.5rem 0;
+}
+
+.filter-btn {
+    padding: 0.375rem 0.875rem;
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    color: var(--color-text);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    transition: background 0.15s;
+}
+.filter-btn.active {
+    background: var(--color-text);
+    color: var(--color-bg);
+    border-color: transparent;
+}
+
+.search-input {
+    margin-left: auto;
+    padding: 0.375rem 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: var(--color-card);
+    color: var(--color-text);
+    font-size: 0.875rem;
+    width: 200px;
+}
+.search-input:focus { outline: 2px solid var(--color-pass); outline-offset: 1px; }
+
+h2 { font-size: 1.25rem; margin-bottom: 1rem; }
+
+/* ── Case list ──────────────────────────────────────────────────────────── */
+.case-list { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.case-item {
+    background: var(--color-card);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: box-shadow 0.2s, transform 0.15s;
+}
+.case-item:hover {
+    box-shadow: 0 6px 20px -4px rgb(0 0 0 / 0.12);
+    transform: translateY(-1px);
+}
+
+.case-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+    cursor: pointer;
+    user-select: none;
+}
+
+.expand-icon {
+    color: var(--color-muted);
+    font-size: 0.65rem;
+    transition: transform 0.2s;
+    flex-shrink: 0;
+}
+.case-item.expanded .expand-icon { transform: rotate(90deg); }
+
+.case-status {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    color: white;
+    font-size: 0.7rem;
+    flex-shrink: 0;
+}
+.case-status.pass  { background: var(--color-pass); }
+.case-status.fail  { background: var(--color-fail); }
+.case-status.error { background: var(--color-warn); }
+
+.case-name { flex: 1; font-weight: 500; }
+
+.case-score {
+    font-family: monospace;
+    font-size: 0.78rem;
+    color: var(--color-muted);
+    background: var(--color-bg);
+    border-radius: 4px;
+    padding: 0.1rem 0.35rem;
+}
+
+.case-duration { color: var(--color-muted); font-size: 0.875rem; }
+
+/* ── Case detail body ───────────────────────────────────────────────────── */
+.case-details {
+    display: none;
+    padding: 0 1rem 1rem;
+    border-top: 1px solid var(--color-border);
+}
+.case-item.expanded .case-details { display: block; }
+
+.detail-section { margin-top: 0.75rem; }
+
+.detail-section summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--color-text);
+    padding: 0.25rem 0;
+    user-select: none;
+    list-style: none;
+}
+.detail-section summary::before { content: '▶ '; font-size: 0.6rem; color: var(--color-muted); }
+details[open] > summary::before { content: '▼ '; }
+
+.response-box {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: monospace;
+    font-size: 0.8rem;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.tool-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+}
+.tool-table th, .tool-table td {
+    border: 1px solid var(--color-border);
+    padding: 0.4rem 0.5rem;
+    text-align: left;
+}
+.tool-table th { background: var(--color-bg); font-weight: 600; }
+.tool-table td { font-family: monospace; word-break: break-all; }
+
+.trajectory-timeline {
+    margin-top: 0.5rem;
+    padding-left: 1rem;
+    border-left: 2px solid var(--color-border);
+}
+
+.traj-step {
+    padding: 0.2rem 0 0.2rem 0.75rem;
+    font-size: 0.8rem;
+    position: relative;
+}
+.traj-step::before {
+    content: '';
+    position: absolute;
+    left: -0.42rem;
+    top: 0.55rem;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--color-muted);
+}
+.traj-step.node::before { background: #6366f1; }
+.traj-step.tool::before { background: #f59e0b; }
+.traj-label  { font-weight: 600; }
+.traj-detail { color: var(--color-muted); margin-left: 0.25rem; }
+
+.node-box {
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0.5rem 0.75rem;
+    margin-top: 0.35rem;
+    font-size: 0.8rem;
+}
+.node-box-title { font-weight: 600; color: #6366f1; }
+.node-box p {
+    margin: 0.25rem 0 0;
+    font-family: monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ── Criterion score bars ───────────────────────────────────────────────── */
+.criterion-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+}
+
+.criterion-row {
+    display: grid;
+    grid-template-columns: 1.25rem 9rem 1fr 5.5rem 1.25rem;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    background: var(--color-bg);
+    border-radius: 4px;
+}
+
+.criterion-icon  { font-size: 0.875rem; text-align: center; }
+.criterion-name  { font-size: 0.875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.score-bar-wrap {
+    background: var(--color-border);
+    border-radius: 999px;
+    height: 8px;
+    overflow: hidden;
+}
+.score-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease;
+}
+
+.score-value { font-family: monospace; font-size: 0.78rem; color: var(--color-muted); white-space: nowrap; }
+
+.criterion-reason {
+    grid-column: 2 / -1;
+    color: var(--color-muted);
+    font-size: 0.78rem;
+    padding-left: 0.25rem;
+    padding-top: 0.1rem;
+}
+
+/* ── Error box ──────────────────────────────────────────────────────────── */
+.error-message {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 4px;
+    padding: 0.75rem;
+    color: #991b1b;
+    margin-top: 0.5rem;
+    font-family: monospace;
+    font-size: 0.875rem;
+}
+[data-theme="dark"] .error-message {
+    background: #2d1515;
+    border-color: #7f1d1d;
+    color: #fca5a5;
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) .error-message {
+        background: #2d1515;
+        border-color: #7f1d1d;
+        color: #fca5a5;
+    }
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+footer {
+    margin-top: 2.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--color-border);
+}
+
+.footer-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+    text-align: center;
+}
+
+.footer-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.95rem;
+}
+
+.footer-logo {
+    font-size: 1.1rem;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.footer-brand-name {
+    font-weight: 800;
+    background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.footer-tagline {
+    color: var(--color-muted);
+    font-size: 0.875rem;
+}
+
+.footer-links {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.footer-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: #6366f1;
+    text-decoration: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: color 0.15s;
+}
+.footer-link:hover { color: #8b5cf6; text-decoration: underline; }
+
+.footer-sep { color: var(--color-border); }
+
+.footer-note {
+    color: var(--color-muted);
+    font-size: 0.75rem;
+    max-width: 540px;
+}
+
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <header class="sticky-header">
+            <div class="header-inner">
+                <div class="brand">
+                    <span class="brand-logo" aria-hidden="true">&#x26A1;</span>
+                    <div class="brand-text">
+                        <span class="brand-name">AgentFlow</span>
+                        <span class="brand-sub">Evaluation Report</span>
+                    </div>
+                    <span class="report-title-chip">s-file</span>
+                </div>
+                <div class="header-meta">
+                    <span class="timestamp">Generated: 2026-06-11 00:12:20</span>
+                    <a class="header-link" href="https://agentflow.10xscale.ai/" target="_blank" rel="noopener" title="Documentation">
+                        &#x1F4D6; Docs
+                    </a>
+                    <a class="header-link" href="https://github.com/10xHub/Agentflow" target="_blank" rel="noopener" title="GitHub Repository">
+                        &#x1F4BE; GitHub
+                    </a>
+                    <button id="theme-toggle" class="theme-btn" aria-label="Toggle dark mode">&#x1F319;</button>
+                </div>
+            </div>
+        </header>
+
+        <section class="summary">
+            <div class="stat-card">
+                <div class="stat-icon">&#x1F4CB;</div>
+                <div class="stat-value">1</div>
+                <div class="stat-label">Total Cases</div>
+            </div>
+            <div class="stat-card stat-pass">
+                <div class="stat-icon">&#x2705;</div>
+                <div class="stat-value">1</div>
+                <div class="stat-label">Passed</div>
+            </div>
+            <div class="stat-card stat-fail">
+                <div class="stat-icon">&#x274C;</div>
+                <div class="stat-value">0</div>
+                <div class="stat-label">Failed</div>
+            </div>
+            <div class="stat-card stat-warn">
+                <div class="stat-icon">&#x26A0;&#xFE0F;</div>
+                <div class="stat-value">0</div>
+                <div class="stat-label">Errors</div>
+            </div>
+            <div class="stat-card stat-rate">
+                <div class="stat-icon">&#x1F4C8;</div>
+                <div class="stat-value">100%</div>
+                <div class="stat-label">Pass Rate</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: 100%"></div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">&#x23F1;&#xFE0F;</div>
+                <div class="stat-value">0.00s</div>
+                <div class="stat-label">Duration</div>
+            </div>
+
+        </section>
+
+        <section class="charts-section">
+            <div class="chart-panel">
+                <h2>&#x1F4CA; Criterion Breakdown</h2>
+                <div id="criterion-breakdown"></div>
+            </div>
+            <div class="chart-panel">
+                <h2>&#x1F3AF; Score by Case</h2>
+                <div id="case-chart"></div>
+            </div>
+        </section>
+
+        <section class="cases-section">
+            <div class="filter-bar">
+                <button class="filter-btn active" data-filter="all">All</button>
+                <button class="filter-btn" data-filter="pass">&#x2705; Passed</button>
+                <button class="filter-btn" data-filter="fail">&#x274C; Failed</button>
+                <button class="filter-btn" data-filter="error">&#x26A0; Errors</button>
+                <input id="case-search" class="search-input" type="search"
+                       placeholder="&#x1F50D; Search cases&#x2026;" />
+            </div>
+            <div class="case-list">
+            <div class="case-item" data-status="pass" data-score="0.0000">
+                <div class="case-header">
+                    <span class="expand-icon">&#x25BA;</span>
+                    <div class="case-status pass">✓</div>
+                    <span class="case-name">c1</span>
+                    <span class="case-score">Score: 0.00</span>
+                    <span class="case-duration">0.00s</span>
+                </div>
+                <div class="case-details">
+                </div>
+            </div>
+            </div>
+        </section>
+
+        <footer>
+            <div class="footer-inner">
+                <div class="footer-brand">
+                    <span class="footer-logo" aria-hidden="true">&#x26A1;</span>
+                    <span class="footer-brand-name">AgentFlow</span>
+                    <span class="footer-tagline">— Multi-Agent AI Framework by 10xScale</span>
+                </div>
+                <div class="footer-links">
+                    <a class="footer-link" href="https://agentflow.10xscale.ai/" target="_blank" rel="noopener">
+                        &#x1F4D6; Documentation
+                    </a>
+                    <span class="footer-sep" aria-hidden="true">&#x2022;</span>
+                    <a class="footer-link" href="https://github.com/10xHub/Agentflow" target="_blank" rel="noopener">
+                        &#x1F4BE; GitHub
+                    </a>
+                    <span class="footer-sep" aria-hidden="true">&#x2022;</span>
+                    <a class="footer-link" href="https://pypi.org/project/10xscale-agentflow/" target="_blank" rel="noopener">
+                        &#x1F4E6; PyPI
+                    </a>
+                </div>
+                <p class="footer-note">Generated by the AgentFlow Evaluation Framework &nbsp;&middot;&nbsp; Report is self-contained, no internet connection required to view.</p>
+            </div>
+        </footer>
+
+    </div>
+    <script>
+
+(function () {
+    'use strict';
+
+    /* ── Dark mode ─────────────────────────────────────────────────────── */
+    const root = document.documentElement;
+    const themeBtn = document.getElementById('theme-toggle');
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+
+    function applyTheme(dark) {
+        root.setAttribute('data-theme', dark ? 'dark' : 'light');
+        if (themeBtn) { themeBtn.textContent = dark ? '\u2600\ufe0f' : '\ud83c\udf19'; }
+    }
+    applyTheme(mq.matches);
+    if (themeBtn) {
+        themeBtn.addEventListener('click', function () {
+            applyTheme(root.getAttribute('data-theme') !== 'dark');
+        });
+    }
+
+    /* ── Case expand / collapse ────────────────────────────────────────── */
+    document.querySelectorAll('.case-header').forEach(function (header) {
+        header.addEventListener('click', function () {
+            header.closest('.case-item').classList.toggle('expanded');
+        });
+    });
+
+    /* ── Filter buttons ────────────────────────────────────────────────── */
+    var activeFilter = 'all';
+    document.querySelectorAll('.filter-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            document.querySelectorAll('.filter-btn').forEach(function (b) {
+                b.classList.remove('active');
+            });
+            btn.classList.add('active');
+            activeFilter = btn.dataset.filter;
+            applyFilters();
+        });
+    });
+
+    /* ── Search ────────────────────────────────────────────────────────── */
+    var searchQuery = '';
+    var searchInput = document.getElementById('case-search');
+    if (searchInput) {
+        searchInput.addEventListener('input', function () {
+            searchQuery = searchInput.value.toLowerCase();
+            applyFilters();
+        });
+    }
+
+    function applyFilters() {
+        document.querySelectorAll('.case-item').forEach(function (item) {
+            var statusOk = activeFilter === 'all' || item.dataset.status === activeFilter;
+            var nameEl = item.querySelector('.case-name');
+            var name = nameEl ? nameEl.textContent.toLowerCase() : '';
+            var searchOk = !searchQuery || name.indexOf(searchQuery) !== -1;
+            item.style.display = (statusOk && searchOk) ? '' : 'none';
+        });
+        renderCaseChart();
+    }
+
+    /* ── SVG helpers ───────────────────────────────────────────────────── */
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+
+    function makeSvg(w, h) {
+        var svg = document.createElementNS(SVG_NS, 'svg');
+        svg.setAttribute('width', w);
+        svg.setAttribute('height', h);
+        svg.setAttribute('class', 'chart-svg');
+        svg.setAttribute('aria-hidden', 'true');
+        return svg;
+    }
+
+    function makeRect(x, y, w, h, fill) {
+        var r = document.createElementNS(SVG_NS, 'rect');
+        r.setAttribute('x', x);
+        r.setAttribute('y', y);
+        r.setAttribute('width', Math.max(0, w));
+        r.setAttribute('height', h);
+        r.setAttribute('fill', fill);
+        r.setAttribute('rx', 3);
+        return r;
+    }
+
+    function makeText(x, y, txt, anchor, cls) {
+        var t = document.createElementNS(SVG_NS, 'text');
+        t.setAttribute('x', x);
+        t.setAttribute('y', y);
+        t.setAttribute('text-anchor', anchor);
+        if (cls) { t.setAttribute('class', cls); }
+        t.textContent = txt;
+        return t;
+    }
+
+    function scoreColor(score) {
+        var hue = Math.round(score * 120);
+        return 'hsl(' + hue + ',65%,45%)';
+    }
+
+    function truncate(str, maxLen) {
+        return str.length > maxLen ? str.slice(0, maxLen - 1) + '\u2026' : str;
+    }
+
+    /* ── Criterion breakdown chart ──────────────────────────────────────── */
+    function renderCriterionChart() {
+        var container = document.getElementById('criterion-breakdown');
+        if (!container) { return; }
+        container.innerHTML = '';
+
+        var critMap = {};
+        document.querySelectorAll('.criterion-row').forEach(function (row) {
+            var name = row.dataset.criterion;
+            var score = parseFloat(row.dataset.score);
+            if (!name || isNaN(score)) { return; }
+            if (!critMap[name]) { critMap[name] = { total: 0, count: 0 }; }
+            critMap[name].total += score;
+            critMap[name].count += 1;
+        });
+
+        var entries = Object.keys(critMap).map(function (name) {
+            var d = critMap[name];
+            return { name: name, avg: d.total / d.count };
+        }).sort(function (a, b) { return b.avg - a.avg; });
+
+        if (!entries.length) {
+            container.textContent = 'No criteria data.';
+            return;
+        }
+
+        var BAR_H = 22, GAP = 6;
+        var PAD = { top: 8, left: 140, right: 48, bottom: 8 };
+        var W = container.clientWidth || 260;
+        var availW = W - PAD.left - PAD.right;
+        var H = entries.length * (BAR_H + GAP) + PAD.top + PAD.bottom;
+        var svg = makeSvg(W, H);
+
+        entries.forEach(function (entry, i) {
+            var y = PAD.top + i * (BAR_H + GAP);
+            var barW = entry.avg * availW;
+            /* track */
+            var bg = makeRect(PAD.left, y, availW, BAR_H, 'var(--color-border)');
+            bg.style.opacity = '0.3';
+            svg.appendChild(bg);
+            /* fill */
+            svg.appendChild(makeRect(PAD.left, y, barW, BAR_H, scoreColor(entry.avg)));
+            /* labels */
+            svg.appendChild(makeText(PAD.left - 6, y + BAR_H * 0.68, truncate(entry.name, 20), 'end', 'chart-label'));
+            svg.appendChild(makeText(PAD.left + barW + 5, y + BAR_H * 0.68, entry.avg.toFixed(2), 'start', 'chart-val'));
+        });
+
+        container.appendChild(svg);
+    }
+
+    /* ── Score by case chart ────────────────────────────────────────────── */
+    function renderCaseChart() {
+        var container = document.getElementById('case-chart');
+        if (!container) { return; }
+        container.innerHTML = '';
+
+        var items = Array.prototype.slice.call(document.querySelectorAll('.case-item')).filter(function (el) {
+            return el.style.display !== 'none';
+        });
+
+        if (!items.length) {
+            container.textContent = 'No cases to display.';
+            return;
+        }
+
+        var BAR_H = 18, GAP = 6;
+        var PAD = { top: 8, left: 140, right: 48, bottom: 8 };
+        var W = container.clientWidth || 260;
+        var availW = W - PAD.left - PAD.right;
+        var H = items.length * (BAR_H + GAP) + PAD.top + PAD.bottom;
+        var svg = makeSvg(W, H);
+
+        items.forEach(function (item, i) {
+            var nameEl = item.querySelector('.case-name');
+            var rawName = nameEl ? nameEl.textContent : '';
+            var name = truncate(rawName, 22);
+            var score = parseFloat(item.dataset.score || '0');
+            var status = item.dataset.status;
+            var y = PAD.top + i * (BAR_H + GAP);
+            var barW = score * availW;
+            var fill = status === 'pass'  ? 'var(--color-pass)'
+                     : status === 'error' ? 'var(--color-warn)'
+                     : 'var(--color-fail)';
+            /* track */
+            var bg = makeRect(PAD.left, y, availW, BAR_H, 'var(--color-border)');
+            bg.style.opacity = '0.2';
+            svg.appendChild(bg);
+            /* fill */
+            svg.appendChild(makeRect(PAD.left, y, barW, BAR_H, fill));
+            /* labels */
+            svg.appendChild(makeText(PAD.left - 6, y + BAR_H * 0.75, name, 'end', 'chart-label'));
+            svg.appendChild(makeText(PAD.left + barW + 5, y + BAR_H * 0.75, score.toFixed(2), 'start', 'chart-val'));
+        });
+
+        container.appendChild(svg);
+    }
+
+    /* ── Initial render ─────────────────────────────────────────────────── */
+    renderCriterionChart();
+    renderCaseChart();
+
+    /* Re-render on resize */
+    var _rTimer;
+    window.addEventListener('resize', function () {
+        clearTimeout(_rTimer);
+        _rTimer = setTimeout(function () {
+            renderCriterionChart();
+            renderCaseChart();
+        }, 150);
+    });
+
+}());
+
+    </script>
+</body>
+</html>

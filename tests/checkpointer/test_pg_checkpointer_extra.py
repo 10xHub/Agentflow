@@ -1,5 +1,6 @@
 import json
-from unittest.mock import AsyncMock, MagicMock
+from enum import Enum
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -195,3 +196,162 @@ async def test_aget_message_not_found_raises(cp):
 
     with pytest.raises(ValueError):
         await cp.aget_message({"thread_id": "t1"}, "missing")
+
+
+def test_import_error_asyncpg(monkeypatch):
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_ASYNCPG", False)
+    with pytest.raises(ImportError) as exc:
+        PgCheckpointer(postgres_dsn="postgres://x")
+    assert "requires 'asyncpg'" in str(exc.value)
+
+
+def test_import_error_redis(monkeypatch):
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_ASYNCPG", True)
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_REDIS", False)
+    with pytest.raises(ImportError) as exc:
+        PgCheckpointer(postgres_dsn="postgres://x")
+    assert "requires 'redis'" in str(exc.value)
+
+
+def test_schema_name_validation_on_init(monkeypatch):
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_ASYNCPG", True)
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_REDIS", True)
+    with pytest.raises(ValueError):
+        PgCheckpointer(postgres_dsn="postgres://x", redis=MagicMock(), schema="invalid-schema-name")
+
+
+def test_init_with_pools(monkeypatch):
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_ASYNCPG", True)
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_REDIS", True)
+    
+    mock_pg_pool = MagicMock()
+    mock_redis_pool = MagicMock()
+    
+    with patch("agentflow.storage.checkpointer.pg_checkpointer.Redis") as mock_redis_class:
+        cp = PgCheckpointer(pg_pool=mock_pg_pool, redis_pool=mock_redis_pool)
+        assert cp._pg_pool is mock_pg_pool
+        mock_redis_class.assert_called_once_with(connection_pool=mock_redis_pool)
+
+
+def test_create_redis_pool_no_url(monkeypatch):
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_ASYNCPG", True)
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_REDIS", True)
+    
+    cp = PgCheckpointer(postgres_dsn="postgres://x", redis=MagicMock())
+    with pytest.raises(ValueError):
+        cp._create_redis_pool(redis=None, redis_pool=None, redis_url=None, redis_pool_config={})
+
+
+def test_create_pg_pool(cp):
+    mock_pool = MagicMock()
+    assert cp._create_pg_pool(pg_pool=mock_pool, postgres_dsn=None, pool_config={}) is mock_pool
+    
+    with patch("asyncpg.create_pool") as mock_create_pool:
+        cp._create_pg_pool(pg_pool=None, postgres_dsn="postgres://url", pool_config={"min_size": 5})
+        mock_create_pool.assert_called_once_with(dsn="postgres://url", min_size=5)
+
+
+@pytest.mark.asyncio
+async def test_get_pg_pool_lazy(monkeypatch):
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_ASYNCPG", True)
+    monkeypatch.setattr("agentflow.storage.checkpointer.pg_checkpointer.HAS_REDIS", True)
+    
+    cp = PgCheckpointer(postgres_dsn="postgres://dsn", redis=MagicMock())
+    assert cp._pg_pool is None
+    
+    mock_pool = MagicMock()
+    async def mock_create_pool(*args, **kwargs):
+        return mock_pool
+        
+    monkeypatch.setattr(cp, "_create_pg_pool", mock_create_pool)
+    pool = await cp._get_pg_pool()
+    assert pool is mock_pool
+    assert cp._pg_pool is mock_pool
+
+
+def test_json_serializer_fast_json_importers(monkeypatch, cp):
+    monkeypatch.setenv("FAST_JSON", "1")
+    
+    import builtins
+    real_import = builtins.__import__
+    def mock_import(name, *args, **kwargs):
+        if name in ("orjson", "msgspec"):
+            raise ImportError
+        return real_import(name, *args, **kwargs)
+        
+    with patch("builtins.__import__", side_effect=mock_import):
+        serializer = cp._get_json_serializer()
+        assert serializer == json.dumps
+
+
+@pytest.mark.asyncio
+async def test_check_and_apply_schema_version_upgrade(cp):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"version": 1})
+    
+    with patch.object(cp, "_get_current_schema_version", return_value=2):
+        await cp._check_and_apply_schema_version(conn)
+        
+    conn.execute.assert_called_once_with(
+        'INSERT INTO "public"."schema_version" (version) VALUES ($1)', 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_check_and_apply_schema_version_exception(cp):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=RuntimeError("db error"))
+    
+    await cp._check_and_apply_schema_version(conn)
+    conn.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_initialize_schema_early_return(cp):
+    cp._schema_initialized = True
+    await cp._initialize_schema()
+    assert cp._pg_pool is None or not cp._pg_pool.acquire.called
+
+
+@pytest.mark.asyncio
+async def test_initialize_schema_error(cp):
+    cp._schema_initialized = False
+    
+    conn = AsyncMock()
+    conn.execute = AsyncMock(side_effect=RuntimeError("sql error"))
+    
+    cp._pg_pool = MagicMock()
+    cp._pg_pool.acquire.return_value = _AcquireCtx(conn)
+    
+    with pytest.raises(RuntimeError):
+        await cp._initialize_schema()
+
+
+def test_serialize_state_enum_handler(cp):
+    class MockEnum(Enum):
+        VAL = "enum_val"
+        
+    class MockObj:
+        def __str__(self):
+            return "str_obj"
+            
+    mock_state = MagicMock()
+    mock_state.model_dump.return_value = {"enum": MockEnum.VAL, "obj": MockObj()}
+    serialized = cp._serialize_state(mock_state)
+    loaded = json.loads(serialized)
+    assert loaded["enum"] == "enum_val"
+    assert loaded["obj"] == "str_obj"
+
+
+def test_deserialize_state_errors(cp):
+    class BadState:
+        @classmethod
+        def model_validate(cls, d):
+            raise TypeError("validation error")
+            
+    with pytest.raises(TypeError):
+        cp._deserialize_state({"invalid": "data"}, BadState)
+        
+    with pytest.raises(json.JSONDecodeError):
+        cp._deserialize_state("invalid-str", BadState)
+

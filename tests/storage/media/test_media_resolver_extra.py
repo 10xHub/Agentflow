@@ -284,3 +284,132 @@ async def test_retrieve_bytes_invalid_kind_raises():
 def test_openai_image_url_helper_shape():
     part = _openai_image_url("https://example.com/x.png")
     assert part == {"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}
+
+
+def test_with_cache_configures_resolver():
+    from agentflow.storage.media.resolver import MediaRefResolver
+    resolver = MediaRefResolver()
+    cache = object()
+    out = resolver.with_cache(cache, expiration_seconds=1800, refresh_buffer_seconds=30)
+    assert out is resolver
+    assert resolver.cache_backend is cache
+    assert resolver.direct_url_expiration_seconds == 1800
+    assert resolver.direct_url_refresh_buffer_seconds == 30
+
+
+@pytest.mark.asyncio
+async def test_resolve_openai_legacy_fallback_reftypes_and_empty():
+    from agentflow.storage.media.resolver import MediaRefResolver
+    resolver = MediaRefResolver()
+    ref_empty = MediaRef.model_construct(kind="unknown")
+    res = await resolver._resolve_openai_legacy(ref_empty)
+    assert res == {"type": "image_url", "image_url": {"url": ""}}
+
+
+@pytest.mark.asyncio
+async def test_resolve_google_legacy_various_refs():
+    from agentflow.storage.media.resolver import MediaRefResolver
+    resolver = MediaRefResolver(media_store=_Store())
+    
+    class _Part:
+        @staticmethod
+        def from_uri(file_uri, mime_type):
+            return {"uri": file_uri, "mime": mime_type}
+        
+        @staticmethod
+        def from_bytes(data, mime_type):
+            return {"data": data, "mime": mime_type}
+            
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    with patch("google.genai.types.Part", _Part):
+        ref_internal = MediaRef(kind="url", url="agentflow://media/k")
+        part1 = await resolver._resolve_google_legacy(ref_internal)
+        assert part1 == {"uri": "https://signed.example/k.png", "mime": "application/octet-stream"}
+        
+        resolver.media_store.url_map["k"] = None
+        part2 = await resolver._resolve_google_legacy(ref_internal)
+        assert part2 == {"data": b"abc", "mime": "image/png"}
+        
+        ref_external = MediaRef(kind="url", url="https://example.com/y.jpg", mime_type="image/jpeg")
+        part3 = await resolver._resolve_google_legacy(ref_external)
+        assert part3 == {"uri": "https://example.com/y.jpg", "mime": "image/jpeg"}
+        
+        ref_data = MediaRef(kind="data", data_base64=base64.b64encode(b"hello").decode(), mime_type="text/plain")
+        part4 = await resolver._resolve_google_legacy(ref_data)
+        assert part4 == {"data": b"hello", "mime": "text/plain"}
+        
+        ref_file = MediaRef(kind="file_id", file_id="file-123", mime_type="image/png")
+        part5 = await resolver._resolve_google_legacy(ref_file)
+        assert isinstance(part5, _Part)
+        assert part5.kwargs["file_data"].file_uri == "file-123"
+        
+        ref_unres = MediaRef.model_construct(kind="unknown")
+        part6 = await resolver._resolve_google_legacy(ref_unres)
+        assert isinstance(part6, _Part)
+        assert part6.kwargs["text"] == "[Unresolvable media reference]"
+
+
+@pytest.mark.asyncio
+async def test_try_transport_modes():
+    from agentflow.storage.media.resolver import MediaRefResolver
+    resolver = MediaRefResolver()
+    
+    result = await resolver._try_transport(MediaRef(kind="url"), MediaTransportMode.provider_file, "openai", object())
+    assert result is None
+    
+    class _Part:
+        @staticmethod
+        def from_uri(file_uri, mime_type):
+            return {"uri": file_uri, "mime": mime_type}
+            
+    resolver.media_store = _Store()
+    caps = type("Caps", (), {"can_convert_internal_to_remote": True})()
+    with patch("google.genai.types.Part", _Part):
+        res = await resolver._transport_remote_url(
+            MediaRef(kind="url", url="agentflow://media/k", mime_type="image/png"),
+            caps,
+            provider="google"
+        )
+        assert res == {"uri": "https://signed.example/k.png", "mime": "image/png"}
+
+
+@pytest.mark.asyncio
+async def test_transport_inline_bytes_url_retrieve_fail():
+    from agentflow.storage.media.resolver import MediaRefResolver
+    resolver = MediaRefResolver()
+    async def _fail(*args):
+        raise ValueError("fetch fail")
+    resolver._retrieve_bytes = _fail
+    res = await resolver._transport_inline_bytes(MediaRef(kind="url", url="https://x"), "openai")
+    assert res is None
+
+
+@pytest.mark.asyncio
+async def test_get_cached_signed_url_expired_or_invalid():
+    from agentflow.storage.media.resolver import MediaRefResolver
+    resolver = MediaRefResolver(cache_backend=_Cache())
+    resolver.cache_backend.values[("media:signed-url", "k")] = "not-a-dict"
+    res1 = await resolver._get_cached_signed_url("k")
+    assert res1 is None
+    
+    resolver.cache_backend.values[("media:signed-url", "k")] = {"url": "https://x"}
+    res2 = await resolver._get_cached_signed_url("k")
+    assert res2 is None
+    
+    resolver.cache_backend.values[("media:signed-url", "k")] = {"url": "https://x", "expires_at": 100}
+    resolver.direct_url_refresh_buffer_seconds = 60
+    res3 = await resolver._get_cached_signed_url("k")
+    assert res3 is None
+
+
+def test_source_kind_helper_variations():
+    from agentflow.storage.media.resolver import _source_kind
+    assert _source_kind(MediaRef(kind="url", url="agentflow://media/k")) == "internal_ref"
+    assert _source_kind(MediaRef(kind="url", url="https://x")) == "url"
+    assert _source_kind(MediaRef(kind="data")) == "data"
+    assert _source_kind(MediaRef(kind="file_id")) == "file_id"
+    assert _source_kind(MediaRef.model_construct(kind="other")) == "other"
+
+

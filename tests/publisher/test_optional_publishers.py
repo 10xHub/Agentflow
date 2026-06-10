@@ -411,6 +411,84 @@ class TestKafkaPublisher:
             assert parsed_message["event"] == "tool_execution"
             assert parsed_message["node_name"] == "kafka_test"
 
+    @pytest.mark.asyncio
+    async def test_kafka_publisher_closed_errors(self):
+        """Test KafkaPublisher closed errors."""
+        from agentflow.runtime.publisher.kafka_publisher import KafkaPublisher
+        publisher = KafkaPublisher()
+        publisher._is_closed = True
+        
+        with pytest.raises(RuntimeError, match="KafkaPublisher is closed"):
+            await publisher._get_producer()
+            
+        with pytest.raises(RuntimeError, match="Cannot publish to closed KafkaPublisher"):
+            await publisher.publish(EventModel(event=Event.GRAPH_EXECUTION, event_type=EventType.START))
+
+    @pytest.mark.asyncio
+    @patch('importlib.import_module')
+    async def test_kafka_publisher_get_producer_early_return(self, mock_import):
+        """Test early return in _get_producer if already initialized."""
+        from agentflow.runtime.publisher.kafka_publisher import KafkaPublisher
+        publisher = KafkaPublisher()
+        publisher._producer = MagicMock()
+        
+        res = await publisher._get_producer()
+        assert res == publisher._producer
+        mock_import.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_kafka_publisher_missing_module(self):
+        """Test missing aiokafka ImportError fallback."""
+        from agentflow.runtime.publisher.kafka_publisher import KafkaPublisher
+        publisher = KafkaPublisher()
+        
+        with patch('agentflow.runtime.publisher.kafka_publisher.importlib.import_module', side_effect=ImportError):
+            with pytest.raises(RuntimeError, match="requires the 'aiokafka' package"):
+                await publisher._get_producer()
+
+    @pytest.mark.asyncio
+    async def test_kafka_publisher_close_methods(self):
+        """Test close() and sync_close() paths."""
+        from agentflow.runtime.publisher.kafka_publisher import KafkaPublisher
+        publisher = KafkaPublisher()
+        
+        # Closed early return
+        publisher._is_closed = True
+        await publisher.close()
+        
+        # Close with producer
+        publisher._is_closed = False
+        mock_producer = AsyncMock()
+        publisher._producer = mock_producer
+        
+        await publisher.close()
+        mock_producer.stop.assert_called_once()
+        assert publisher._producer is None
+        assert publisher._is_closed is True
+        
+        # Close with exception in stop
+        publisher = KafkaPublisher()
+        mock_producer = AsyncMock()
+        mock_producer.stop.side_effect = Exception("stop failed")
+        publisher._producer = mock_producer
+        
+        await publisher.close()
+        assert publisher._producer is None
+        assert publisher._is_closed is True
+
+        # Test sync_close
+        publisher = KafkaPublisher()
+        publisher.close = AsyncMock()
+        publisher.sync_close()
+        publisher.close.assert_called_once()
+
+        # Test sync_close active loop warning
+        publisher = KafkaPublisher()
+        with patch('asyncio.run', side_effect=RuntimeError):
+            with patch('agentflow.runtime.publisher.kafka_publisher.logger.warning') as mock_warn:
+                publisher.sync_close()
+                mock_warn.assert_called_once()
+
 
 class TestRabbitMQPublisher:
     """Test RabbitMQPublisher with mocked dependencies."""
@@ -504,6 +582,124 @@ class TestRabbitMQPublisher:
             
         # Verify message creation - Mock should be called as a constructor
         assert mock_pika.Message.called
+
+    @pytest.mark.asyncio
+    async def test_rabbitmq_publisher_closed_errors(self):
+        """Test RabbitMQPublisher raising RuntimeError when closed."""
+        from agentflow.runtime.publisher.rabbitmq_publisher import RabbitMQPublisher
+        publisher = RabbitMQPublisher()
+        publisher._is_closed = True
+        
+        with pytest.raises(RuntimeError, match="RabbitMQPublisher is closed"):
+            await publisher._ensure()
+            
+        with pytest.raises(RuntimeError, match="Cannot publish to closed RabbitMQPublisher"):
+            await publisher.publish(EventModel(event=Event.GRAPH_EXECUTION, event_type=EventType.START))
+
+    @pytest.mark.asyncio
+    @patch('importlib.import_module')
+    async def test_rabbitmq_publisher_ensure_early_return(self, mock_import):
+        """Test early return in _ensure when exchange is already declared."""
+        from agentflow.runtime.publisher.rabbitmq_publisher import RabbitMQPublisher
+        publisher = RabbitMQPublisher()
+        publisher._exchange = MagicMock()
+        
+        await publisher._ensure()
+        mock_import.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rabbitmq_publisher_missing_module(self):
+        """Test RuntimeError when aio_pika module is missing."""
+        from agentflow.runtime.publisher.rabbitmq_publisher import RabbitMQPublisher
+        publisher = RabbitMQPublisher()
+        
+        with patch('agentflow.runtime.publisher.rabbitmq_publisher.importlib.import_module', side_effect=ImportError):
+            with pytest.raises(RuntimeError, match="requires the 'aio-pika' package"):
+                await publisher._ensure()
+
+    @pytest.mark.asyncio
+    @patch('importlib.import_module')
+    async def test_rabbitmq_publisher_default_exchange_fallback(self, mock_import):
+        """Test default exchange declaration fallback when declare=False."""
+        mock_pika = Mock()
+        mock_connection = AsyncMock()
+        mock_channel = AsyncMock()
+        
+        mock_pika.connect_robust = AsyncMock(return_value=mock_connection)
+        mock_connection.channel = AsyncMock(return_value=mock_channel)
+        mock_import.return_value = mock_pika
+        
+        with patch.dict('sys.modules', {'aio_pika': mock_pika}):
+            from agentflow.runtime.publisher.rabbitmq_publisher import RabbitMQPublisher
+            publisher = RabbitMQPublisher({"declare": False})
+            
+            await publisher._ensure()
+            assert publisher._exchange == mock_channel.default_exchange
+
+    @pytest.mark.asyncio
+    @patch('importlib.import_module')
+    async def test_rabbitmq_publisher_publish_not_initialized(self, mock_import):
+        """Test publish raises RuntimeError when exchange is not initialized."""
+        mock_pika = Mock()
+        mock_import.return_value = mock_pika
+        from agentflow.runtime.publisher.rabbitmq_publisher import RabbitMQPublisher
+        publisher = RabbitMQPublisher()
+        
+        # Mock _ensure to do nothing so _exchange remains None
+        with patch.object(publisher, '_ensure', AsyncMock()):
+            with pytest.raises(RuntimeError, match="exchange not initialized"):
+                await publisher.publish(EventModel(event=Event.GRAPH_EXECUTION, event_type=EventType.START))
+
+    @pytest.mark.asyncio
+    async def test_rabbitmq_publisher_close_methods(self):
+        """Test close() and sync_close() paths."""
+        from agentflow.runtime.publisher.rabbitmq_publisher import RabbitMQPublisher
+        publisher = RabbitMQPublisher()
+        
+        # Close when already closed
+        publisher._is_closed = True
+        await publisher.close()  # Should return early
+        
+        # Close with active channel and connection
+        publisher._is_closed = False
+        mock_channel = AsyncMock()
+        mock_conn = AsyncMock()
+        publisher._channel = mock_channel
+        publisher._conn = mock_conn
+        
+        await publisher.close()
+        mock_channel.close.assert_called_once()
+        mock_conn.close.assert_called_once()
+        assert publisher._channel is None
+        assert publisher._conn is None
+        assert publisher._is_closed is True
+        
+        # Test close with exceptions on close call (should catch and log)
+        publisher = RabbitMQPublisher()
+        publisher._channel = AsyncMock()
+        publisher._channel.close.side_effect = Exception("channel close failed")
+        publisher._conn = AsyncMock()
+        publisher._conn.close.side_effect = Exception("conn close failed")
+        
+        await publisher.close()
+        assert publisher._channel is None
+        assert publisher._conn is None
+        assert publisher._is_closed is True
+
+        # Test sync_close
+        publisher = RabbitMQPublisher()
+        publisher.close = AsyncMock()
+        publisher.sync_close()
+        publisher.close.assert_called_once()
+
+        # Test sync_close raises RuntimeError (active loop)
+        publisher = RabbitMQPublisher()
+        with patch('asyncio.run', side_effect=RuntimeError("active loop")):
+            with patch('agentflow.runtime.publisher.rabbitmq_publisher.logger.warning') as mock_warn:
+                publisher.sync_close()
+                mock_warn.assert_called_once_with("sync_close called within an active event loop; skipping.")
+
+
 class TestOptionalPublisherErrorHandling:
     """Test error handling across optional publishers."""
     
