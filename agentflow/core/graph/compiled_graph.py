@@ -30,6 +30,8 @@ from .utils.stream_handler import StreamHandler
 
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from .state_graph import StateGraph
 
 
@@ -135,6 +137,26 @@ class CompiledGraph[StateT: AgentState]:
         self._interrupt_after: list[str] = interrupt_after
         # generate task manager
         self._task_manager = task_manager
+        # Guards aclose() against being run more than once (e.g. an explicit
+        # aclose() inside an ``async with`` block followed by __aexit__).
+        self._closed = False
+
+    async def __aenter__(self) -> CompiledGraph[StateT]:
+        """Enter an async context; returns this graph unchanged.
+
+        Enables ``async with compiled_graph as graph: ...``, which guarantees
+        :meth:`aclose` runs on exit even if the body raises.
+        """
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Exit the async context, releasing all resources via :meth:`aclose`."""
+        await self.aclose()
 
     def _prepare_config(
         self,
@@ -505,7 +527,7 @@ class CompiledGraph[StateT: AgentState]:
             node_name,
         )
 
-    async def aclose(self) -> dict[str, Any]:
+    async def aclose(self) -> dict[str, Any]:  # noqa: PLR0915
         """
         Close the graph and release all resources gracefully.
 
@@ -519,9 +541,20 @@ class CompiledGraph[StateT: AgentState]:
         Returns:
             Dictionary with detailed shutdown statistics for each component.
 
+        Calling this more than once is a no-op; the second call returns
+        ``{"status": "already_closed"}``. Prefer the async-context-manager form,
+        which calls this automatically on exit:
+
         Example:
             ```python
             async def main():
+                async with await build_and_compile_graph() as graph:
+                    await graph.ainvoke(input_data)
+                # graph.aclose() has run here, even if ainvoke raised
+
+
+            # Or manage the lifecycle manually:
+            async def main_manual():
                 graph = await build_and_compile_graph()
                 try:
                     await graph.ainvoke(input_data)
@@ -531,6 +564,11 @@ class CompiledGraph[StateT: AgentState]:
             ```
         """
         from agentflow.utils.shutdown import shutdown_with_timeout
+
+        if self._closed:
+            logger.debug("CompiledGraph.aclose() called again; already closed")
+            return {"status": "already_closed"}
+        self._closed = True
 
         logger.info("Initiating graceful shutdown of CompiledGraph")
         stats: dict[str, Any] = {}

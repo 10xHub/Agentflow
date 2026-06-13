@@ -202,6 +202,7 @@ class MediaRefResolver:
 
         transport_order = caps.get_transport_order(media_type)
         transports_attempted: list[MediaTransportMode] = []
+        last_error: Exception | None = None
 
         for transport in transport_order:
             transports_attempted.append(transport)
@@ -216,12 +217,16 @@ class MediaRefResolver:
                     return result
             except UnsupportedMediaInputError:
                 raise
-            except Exception:
-                logger.debug(
-                    "Transport %s failed for %s/%s, trying next fallback",
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Media transport %s failed for %s/%s (%s: %s); trying next fallback",
                     transport.value,
                     provider,
                     model,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
                 )
                 continue
 
@@ -231,7 +236,7 @@ class MediaRefResolver:
             media_type=media_type,
             source_kind=_source_kind(ref),
             transports_attempted=transports_attempted,
-        )
+        ) from last_error
 
     async def _try_transport(
         self,
@@ -309,7 +314,15 @@ class MediaRefResolver:
                     from google.genai import types
 
                     return types.Part.from_bytes(data=data, mime_type=mime)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "inline_bytes transport failed to fetch %s for provider %s (%s: %s)",
+                    ref.url,
+                    provider,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 return None
 
         return None
@@ -343,7 +356,14 @@ class MediaRefResolver:
 
                 return await upload_to_google_file_api(data, mime)
 
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "provider_file transport failed (Google File API) for ref kind=%s (%s: %s)",
+                ref.kind,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             return None
 
         return None

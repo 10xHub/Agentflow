@@ -267,6 +267,30 @@ class TestCompiledGraph:
         assert isinstance(stats, dict)  # noqa: S101
         assert "background_tasks" in stats  # noqa: S101
 
+    @pytest.mark.asyncio
+    async def test_aclose_is_idempotent(self):
+        """Closing twice is a no-op and reports already_closed."""
+        first = await self.compiled.aclose()
+        assert "background_tasks" in first  # noqa: S101
+        second = await self.compiled.aclose()
+        assert second == {"status": "already_closed"}  # noqa: S101
+
+    @pytest.mark.asyncio
+    async def test_async_context_manager(self):
+        """`async with` returns the graph and closes it on exit."""
+        async with self.compiled as ctx:
+            assert ctx is self.compiled  # noqa: S101
+            assert self.compiled._closed is False  # noqa: S101, SLF001
+        assert self.compiled._closed is True  # noqa: S101, SLF001
+
+    @pytest.mark.asyncio
+    async def test_async_context_manager_closes_on_exception(self):
+        """aclose() still runs when the context body raises."""
+        with pytest.raises(ValueError, match="boom"):
+            async with self.compiled:
+                raise ValueError("boom")
+        assert self.compiled._closed is True  # noqa: S101, SLF001
+
     def test_generate_graph(self):
         """Test generating graph representation."""
         graph_dict = self.compiled.generate_graph()
