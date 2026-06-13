@@ -28,7 +28,7 @@ config = {
 
 client_http = Client(config)
 
-tool_node = ToolNode(functions=[], client=client_http)
+tool_node = ToolNode([], client=client_http)
 
 
 main_agent = Agent(

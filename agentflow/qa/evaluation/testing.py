@@ -235,7 +235,7 @@ class EvalFixtures:
     Example:
         ```python
         # conftest.py
-        from agentflow.evaluation.testing import EvalFixtures
+        from agentflow.qa.evaluation.testing import EvalFixtures
 
         fixtures = EvalFixtures()
         fixtures.register()
@@ -353,7 +353,7 @@ def create_eval_app(
     Example:
         ```python
         # conftest.py
-        from agentflow.evaluation.testing import create_eval_app
+        from agentflow.qa.evaluation.testing import create_eval_app
 
 
         @pytest.fixture(scope="session")

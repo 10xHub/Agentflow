@@ -5,7 +5,7 @@ Two activation modes are supported:
 **on-demand** (default) — the LLM sees a trigger table and calls ``set_skill()``
 to load skill content when a user request matches a skill::
 
-    from agentflow.skills import SkillConfig
+    from agentflow.core.skills import SkillConfig
 
     agent = Agent(
         model="gpt-4o",
@@ -17,7 +17,7 @@ to load skill content when a user request matches a skill::
 domain/persona.  The framework reads a state field to identify which skill to
 preload, with no trigger table and no extra tool-call round-trip::
 
-    from agentflow.skills import SkillConfig
+    from agentflow.core.skills import SkillConfig
     from agentflow.core.state import AgentState
 
 

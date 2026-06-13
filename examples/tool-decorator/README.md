@@ -77,7 +77,7 @@ def advanced_function(x: int) -> int:
 ### Tag Filtering
 
 ```python
-from agentflow.graph.tool_node import ToolNode
+from agentflow.core.graph import ToolNode
 
 # Create tools with different tags
 @tool(name="read_tool", tags=["database", "read"])

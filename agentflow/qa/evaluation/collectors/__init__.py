@@ -12,7 +12,7 @@ Modules:
 
 Example:
     ```python
-    from agentflow.evaluation.collectors import TrajectoryCollector, make_trajectory_callback
+    from agentflow.qa.evaluation.collectors import TrajectoryCollector, make_trajectory_callback
 
     collector = TrajectoryCollector()
     _, mgr = make_trajectory_callback(collector, config={"thread_id": "eval-1"})

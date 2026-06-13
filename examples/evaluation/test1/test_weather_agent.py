@@ -12,9 +12,8 @@
 
 # import pytest
 
-# from agentflow.evaluation.config.eval_config import CriterionConfig, EvalConfig, MatchType
-# from agentflow.evaluation.evaluator import AgentEvaluator
-# from agentflow.state.message import Message
+# from agentflow.qa.evaluation import AgentEvaluator, CriterionConfig, EvalConfig, MatchType
+# from agentflow.core.state import Message
 
 # from .samples import CAPITAL_QUESTION, LONDON, NYC
 

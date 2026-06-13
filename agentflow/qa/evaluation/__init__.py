@@ -17,8 +17,8 @@ Main Components:
 
 Example:
     ```python
-    from agentflow.evaluation import AgentEvaluator, EvalConfig, CriterionConfig
-    from agentflow.evaluation.dataset import EvalCase, ToolCall
+    from agentflow.qa.evaluation import AgentEvaluator, EvalConfig, CriterionConfig
+    from agentflow.qa.evaluation.dataset import EvalCase, ToolCall
 
     case = EvalCase.single_turn(
         eval_id="test_1",
