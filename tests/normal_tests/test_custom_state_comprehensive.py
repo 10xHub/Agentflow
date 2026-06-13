@@ -6,16 +6,11 @@ Tests state transitions, checkpointing, and type safety.
 from dataclasses import dataclass, field
 from typing import Any
 
-from dotenv import load_dotenv
-
 from agentflow.storage.checkpointer import InMemoryCheckpointer
 from agentflow.core.graph import StateGraph
 from agentflow.core.state.agent_state import AgentState
 from agentflow.core.state import Message
 from agentflow.utils.converter import convert_messages
-
-
-load_dotenv()
 
 
 @dataclass

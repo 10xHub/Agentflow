@@ -72,9 +72,7 @@ def detect_provider(model: str, use_vertex_ai: bool = False) -> str:
     return "openai"
 
 
-def resolve_provider_and_model(
-    model: str, use_vertex_ai: bool = False
-) -> tuple[str, str]:
+def resolve_provider_and_model(model: str, use_vertex_ai: bool = False) -> tuple[str, str]:
     """Resolve a model string into a concrete ``(provider, model)`` pair.
 
     Unlike :func:`detect_provider`, this also returns the model name that should
