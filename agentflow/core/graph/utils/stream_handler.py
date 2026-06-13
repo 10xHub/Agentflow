@@ -39,6 +39,7 @@ from .handler_mixins import (
     InterruptConfigMixin,
 )
 from .utils import (
+    calculate_token_usage,
     call_realtime_sync,
     get_next_node,
     load_or_create_state,
@@ -589,6 +590,7 @@ class StreamHandler[StateT: AgentState](
             event.metadata["is_context_trimmed"] = is_context_trimmed
             publish_event(event)
 
+            # Include messages list for token calculation in stream method
             yield StreamChunk(
                 event=StreamEvent.UPDATES,
                 state=state,
@@ -599,6 +601,8 @@ class StreamHandler[StateT: AgentState](
                     "max_steps": max_steps,
                     "is_context_trimmed": is_context_trimmed,
                     "reason": "Graph execution completed successfully",
+                    # Internal: messages from current run for token calculation
+                    "_messages": messages,
                 },
                 thread_id=config.get("thread_id"),
                 run_id=config.get("run_id"),
@@ -747,8 +751,19 @@ class StreamHandler[StateT: AgentState](
         logger.debug("Beginning graph execution")
         result = self._execute_graph(state, input_data, config)
 
+        # Track messages from current run for token calculation
+        current_run_messages = []
+
         # Stream results based on response granularity
         async for chunk in result:
+            # Extract messages from final completion chunk (internal use only)
+            if (
+                chunk.event == StreamEvent.UPDATES
+                and chunk.data
+                and chunk.data.get("status") == "graph_invoked"
+            ):
+                current_run_messages = chunk.data.pop("_messages", [])
+
             match response_granularity:
                 case ResponseGranularity.FULL:
                     yield chunk
@@ -763,6 +778,9 @@ class StreamHandler[StateT: AgentState](
         time_taken = time.time() - start_time
         logger.info("Graph execution finished in %.2f seconds", time_taken)
 
+        # Calculate token usage from current run messages only
+        token_usage = calculate_token_usage(current_run_messages)
+
         event.event_type = EventType.END
         event.metadata.update(
             {
@@ -772,19 +790,22 @@ class StreamHandler[StateT: AgentState](
                 "current_node": state.execution_meta.current_node,
                 "is_interrupted": state.is_interrupted(),
                 "total_messages": len(state.context) if state.context else 0,
+                **token_usage,
             }
         )
         publish_event(event)
-        yield StreamChunk(
-            event=StreamEvent.UPDATES,
-            state=state,
-            data={
-                "status": "graph_invoked",
-                "reason": "Graph execution finished",
-                "time_taken": time_taken,
-                "is_interrupted": state.is_interrupted(),
-                "total_messages": len(state.context) if state.context else 0,
-            },
-            thread_id=config.get("thread_id"),
-            run_id=config.get("run_id"),
-        )
+        if response_granularity == ResponseGranularity.FULL:
+            yield StreamChunk(
+                event=StreamEvent.UPDATES,
+                state=state,
+                data={
+                    "status": "graph_invoked",
+                    "reason": "Graph execution finished",
+                    "time_taken": time_taken,
+                    "is_interrupted": state.is_interrupted(),
+                    "total_messages": len(state.context) if state.context else 0,
+                    **token_usage,
+                },
+                thread_id=config.get("thread_id"),
+                run_id=config.get("run_id"),
+            )

@@ -11,6 +11,7 @@ from agentflow.core.exceptions import GraphRecursionError
 from agentflow.core.graph.edge import Edge
 from agentflow.core.graph.node import Node
 from agentflow.core.graph.utils.utils import (
+    calculate_token_usage,
     call_realtime_sync,
     get_next_node,
     load_or_create_state,
@@ -479,8 +480,12 @@ class InvokeHandler[StateT: AgentState](
             final_state, messages = await self._execute_graph(state, config)
             logger.info("Graph execution completed with %d final messages", len(messages))
 
+            # Calculate token usage
+            token_usage = calculate_token_usage(messages)
+
             event.event_type = EventType.END
             event.metadata["status"] = "Graph execution completed"
+            event.metadata.update(token_usage)
             event.data["state"] = final_state.model_dump()
             event.data["messages"] = [m.model_dump() for m in messages] if messages else []
             publish_event(event)
@@ -489,6 +494,7 @@ class InvokeHandler[StateT: AgentState](
                 final_state,
                 messages,
                 response_granularity,
+                token_usage=token_usage,
             )
         except Exception as e:
             logger.exception("Graph execution failed: %s", e)
