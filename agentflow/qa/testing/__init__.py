@@ -10,7 +10,7 @@ including:
 
 Example:
     ```python
-    from agentflow.testing import TestAgent, TestContext, MockToolRegistry
+    from agentflow.qa.testing import TestAgent, TestContext, MockToolRegistry
 
     # Use TestAgent as a drop-in replacement for Agent
     test_agent = TestAgent(responses=["Hello from test!"])
@@ -28,7 +28,7 @@ Example:
     assert tools.was_called("get_weather")
 
     # Use MockMCPClient for testing MCP tools
-    from agentflow.testing import MockMCPClient
+    from agentflow.qa.testing import MockMCPClient
 
     mock_mcp = MockMCPClient()
     mock_mcp.add_tool(

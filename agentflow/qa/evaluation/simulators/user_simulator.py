@@ -143,7 +143,7 @@ class UserSimulator:
 
     Example:
         ```python
-        from agentflow.evaluation import (
+        from agentflow.qa.evaluation import (
             UserSimulator,
             ConversationScenario,
             SimulationGoalsCriterion,

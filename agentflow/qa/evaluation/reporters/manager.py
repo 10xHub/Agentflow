@@ -61,8 +61,8 @@ class ReporterManager:
 
     Example:
         ```python
-        from agentflow.evaluation.config.eval_config import ReporterConfig
-        from agentflow.evaluation.reporters.manager import ReporterManager
+        from agentflow.qa.evaluation.config.eval_config import ReporterConfig
+        from agentflow.qa.evaluation.reporters.manager import ReporterManager
 
         manager = ReporterManager(ReporterConfig())
         output = manager.run_all(report)

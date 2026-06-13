@@ -63,7 +63,7 @@ Usage Example:
 ==============
 
     ```python
-    from agentflow.graph import StateGraph, ToolNode
+    from agentflow.core.graph import StateGraph, ToolNode
     from agentflow.utils import START, END
 
 

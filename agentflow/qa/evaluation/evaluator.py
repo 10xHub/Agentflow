@@ -55,8 +55,8 @@ class AgentEvaluator:
 
     Example:
         ```python
-        from agentflow.evaluation import AgentEvaluator, EvalConfig
-        from agentflow.evaluation.collectors import TrajectoryCollector, make_trajectory_callback
+        from agentflow.qa.evaluation import AgentEvaluator, EvalConfig
+        from agentflow.qa.evaluation.collectors import TrajectoryCollector, make_trajectory_callback
 
         collector = TrajectoryCollector(capture_all_events=True)
         _, callback_mgr = make_trajectory_callback(collector)

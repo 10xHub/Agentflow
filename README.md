@@ -1,9 +1,9 @@
 
 # 10xScale Agentflow
 
-![PyPI](https://img.shields.io/pypi/v/agentflow?color=blue)
+![PyPI](https://img.shields.io/pypi/v/10xscale-agentflow?color=blue)
 ![License](https://img.shields.io/github/license/10xhub/agentflow)
-![Python](https://img.shields.io/pypi/pyversions/agentflow)
+![Python](https://img.shields.io/pypi/pyversions/10xscale-agentflow)
 [![Coverage](https://img.shields.io/badge/coverage-74%25-yellow.svg)](#)
 
 **10xScale Agentflow** is a lightweight Python framework for building intelligent agents and orchestrating multi-agent workflows. It's an **LLM-agnostic orchestration tool** that works with native SDKs from OpenAI, Google Gemini, Anthropic Claude, or any other provider. You choose your LLM library; 10xScale Agentflow provides the workflow orchestration.
@@ -17,7 +17,7 @@
 - **🤖 Multi-Agent Workflows** - Build complex agent systems with your choice of orchestration patterns
 - **📊 Structured Responses** - Get `content`, optional `thinking`, and `usage` in a standardized format
 - **🌊 Streaming Support** - Real-time incremental responses with delta updates
-- **🔧 Tool Integration** - Native support for function calling, MCP, Composio, and LangChain tools with **parallel execution**
+- **🔧 Tool Integration** - Native support for function calling and MCP tools with **parallel execution**
 - **🔀 LangGraph-Inspired Engine** - Flexible graph orchestration with nodes, conditional edges, and control flow
 - **💾 State Management** - Built-in persistence with in-memory and PostgreSQL+Redis checkpointers
 - **🔄 Human-in-the-Loop** - Pause/resume execution for approval workflows and debugging
@@ -51,8 +51,6 @@ Agentflow stands out with powerful features designed for production-grade AI app
    - Remote tools (via TypeScript SDK)
    - Agent handoff tools (multi-agent collaboration)
    - MCP (Model Context Protocol)
-   - LangChain tools
-   - Composio tools
 
 ### 🎯 **Intelligent Context Management**
 
@@ -76,7 +74,7 @@ Agentflow stands out with powerful features designed for production-grade AI app
    - Kafka
    - RabbitMQ
    - Redis Pub/Sub
-   - OpenTelemetry (planned)
+   - OpenTelemetry
    - Custom publishers
 
 ### 🔄 **Advanced Execution Features**
@@ -155,19 +153,21 @@ pip install 10xscale-agentflow[mcp]
 # Google GenAI adapter (google-genai SDK)
 pip install 10xscale-agentflow[google-genai]
 
-# Composio tools (adapter)
-pip install 10xscale-agentflow[composio]
+# OpenAI adapter (openai SDK)
+pip install 10xscale-agentflow[openai]
 
-# LangChain tools (registry-based adapter)
-pip install 10xscale-agentflow[langchain]
+# Vector / long-term memory stores
+pip install 10xscale-agentflow[qdrant]    # Qdrant store
+pip install 10xscale-agentflow[mem0]      # Mem0 store
 
 # Individual publishers
 pip install 10xscale-agentflow[redis]     # Redis publisher
 pip install 10xscale-agentflow[kafka]     # Kafka publisher
 pip install 10xscale-agentflow[rabbitmq]  # RabbitMQ publisher
+pip install 10xscale-agentflow[otel]      # OpenTelemetry tracing
 
 # Multiple extras
-pip install 10xscale-agentflow[pg_checkpoint,mcp,google-genai,composio,langchain]
+pip install 10xscale-agentflow[pg_checkpoint,mcp,google-genai,openai]
 ```
 
 ### Environment Setup
@@ -204,8 +204,8 @@ If you have a `.env` file, it will be auto-loaded (via `python-dotenv`).
 Here's a complete tool-calling agent in under 30 lines:
 
 ```python
-from agentflow.graph import Agent, StateGraph, ToolNode
-from agentflow.state import AgentState, Message
+from agentflow.core.graph import Agent, StateGraph, ToolNode
+from agentflow.core.state import AgentState, Message
 from agentflow.utils.constants import END
 
 
@@ -220,7 +220,7 @@ graph = StateGraph()
 graph.add_node("MAIN", Agent(
     model="gemini/gemini-2.5-flash",
     system_prompt=[{"role": "system", "content": "You are a helpful assistant."}],
-    tool_node_name="TOOL"
+    tool_node="TOOL"
 ))
 graph.add_node("TOOL", ToolNode([get_weather]))
 
@@ -259,12 +259,11 @@ For maximum control, use custom functions instead of the Agent class:
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from agentflow.checkpointer import InMemoryCheckpointer
-from agentflow.graph import StateGraph, ToolNode
-from agentflow.state.agent_state import AgentState
-from agentflow.utils import Message
+from agentflow.core.graph import StateGraph, ToolNode
+from agentflow.core.state import AgentState, Message
+from agentflow.storage.checkpointer import InMemoryCheckpointer
+from agentflow.utils import convert_messages
 from agentflow.utils.constants import END
-from agentflow.utils.converter import convert_messages
 
 load_dotenv()
 client = AsyncOpenAI()
@@ -353,7 +352,7 @@ graph.set_entry_point("MAIN")
 # Compile and run
 app = graph.compile(checkpointer=InMemoryCheckpointer())
 
-inp = {"messages": [Message.from_text("What's the weather in New York?")]}
+inp = {"messages": [Message.text_message("What's the weather in New York?")]}
 config = {"thread_id": "12345", "recursion_limit": 10}
 
 res = app.invoke(inp, config=config)
@@ -427,12 +426,11 @@ from dotenv import load_dotenv
 from fastmcp import Client
 from openai import AsyncOpenAI
 
-from agentflow.checkpointer import InMemoryCheckpointer
-from agentflow.graph import StateGraph, ToolNode
-from agentflow.state.agent_state import AgentState
-from agentflow.utils import Message
+from agentflow.core.graph import StateGraph, ToolNode
+from agentflow.core.state import AgentState, Message
+from agentflow.storage.checkpointer import InMemoryCheckpointer
+from agentflow.utils import convert_messages
 from agentflow.utils.constants import END
-from agentflow.utils.converter import convert_messages
 
 load_dotenv()
 client = AsyncOpenAI()
@@ -451,7 +449,7 @@ config = {
 client_http = Client(config)
 
 # Initialize ToolNode with MCP client
-tool_node = ToolNode(functions=[], client=client_http)
+tool_node = ToolNode([], client=client_http)
 
 
 async def main_agent(state: AgentState):
@@ -509,7 +507,7 @@ graph.set_entry_point("MAIN")
 app = graph.compile(checkpointer=checkpointer)
 
 # Run the agent
-inp = {"messages": [Message.from_text("Please call the get_weather function for New York City")]}
+inp = {"messages": [Message.text_message("Please call the get_weather function for New York City")]}
 config = {"thread_id": "12345", "recursion_limit": 10}
 
 res = app.invoke(inp, config=config)
@@ -551,12 +549,11 @@ import logging
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from agentflow.checkpointer import InMemoryCheckpointer
-from agentflow.graph import StateGraph, ToolNode
-from agentflow.state.agent_state import AgentState
-from agentflow.utils import Message, ResponseGranularity
+from agentflow.core.graph import StateGraph, ToolNode
+from agentflow.core.state import AgentState, Message
+from agentflow.storage.checkpointer import InMemoryCheckpointer
+from agentflow.utils import ResponseGranularity, convert_messages
 from agentflow.utils.constants import END
-from agentflow.utils.converter import convert_messages
 
 load_dotenv()
 client = AsyncOpenAI()
@@ -647,7 +644,7 @@ app = graph.compile(checkpointer=checkpointer)
 
 
 async def run_stream_test():
-    inp = {"messages": [Message.from_text("Call get_weather for Tokyo, then reply.")]}
+    inp = {"messages": [Message.text_message("Call get_weather for Tokyo, then reply.")]}
     config = {"thread_id": "stream-1", "recursion_limit": 10}
 
     logging.info("--- streaming start ---")
@@ -693,7 +690,7 @@ python examples/react_stream/stream_react_agent.py
 # Parallel execution:   max(1.0, 1.5, 0.8) = 1.5 seconds ⚡
 ```
 
-See the [parallel tool execution documentation](https://10xhub.github.io/10xScale Agentflow/Concept/graph/tools/#parallel-tool-execution) for more details.
+See the [parallel tool execution documentation](https://10xhub.github.io/Agentflow/Concept/graph/tools/#parallel-tool-execution) for more details.
 
 ---
 
@@ -778,14 +775,14 @@ See `pyproject.dev.toml` for complete tool configurations.
 
 - ✅ Core graph engine with nodes and edges
 - ✅ State management and checkpointing
-- ✅ Tool integration (MCP, Composio, LangChain)
+- ✅ Tool integration (MCP, custom tools, parallel execution)
 - ✅ **Parallel tool execution** for improved performance
 - ✅ Streaming and event publishing
 - ✅ Human-in-the-loop support
 - ✅ Prebuilt agent patterns
-- 🚧 Agent-to-Agent (A2A) communication protocols
+- ✅ Agent-to-Agent (A2A) communication protocols
+- ✅ Observability and tracing (OpenTelemetry)
 - 🚧 Remote node execution for distributed processing
-- 🚧 Enhanced observability and tracing
 - 🚧 More persistence backends (Redis, DynamoDB)
 - 🚧 Parallel/branching strategies
 - 🚧 Visual graph editor
@@ -794,16 +791,16 @@ See `pyproject.dev.toml` for complete tool configurations.
 
 ## 📄 License
 
-MIT License - see [LICENSE](https://github.com/10xhub/10xScale Agentflow/blob/main/LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/10xHub/agentflow/blob/main/LICENSE) for details.
 
 ---
 
 ## 🔗 Links & Resources
 
-- **[Documentation](https://10xhub.github.io/10xScale Agentflow/)** - Full documentation with tutorials and API reference
+- **[Documentation](https://10xhub.github.io/Agentflow/)** - Full documentation with tutorials and API reference
 - **[GitHub Repository](https://github.com/10xhub/10xScale Agentflow)** - Source code and issues
 - **[PyPI Project](https://pypi.org/project/10xScale-Agentflow/)** - Package releases
-- **[Examples Directory](https://github.com/10xhub/10xScale Agentflow/tree/main/examples)** - Runnable code samples
+- **[Examples Directory](https://github.com/10xHub/agentflow/tree/main/examples)** - Runnable code samples
 
 ---
 
@@ -820,11 +817,11 @@ Contributions are welcome! Please see our [GitHub repository](https://github.com
 
 ## 💬 Support
 
-- **Documentation**: [https://10xhub.github.io/10xScale Agentflow/](https://10xhub.github.io/10xScale Agentflow/)
-- **Examples**: Check the [examples directory](https://github.com/10xhub/10xScale Agentflow/tree/main/examples)
-- **Issues**: Report bugs on [GitHub Issues](https://github.com/10xhub/10xScale Agentflow/issues)
-- **Discussions**: Ask questions in [GitHub Discussions](https://github.com/10xhub/10xScale Agentflow/discussions)
+- **Documentation**: [https://10xhub.github.io/Agentflow/](https://10xhub.github.io/Agentflow/)
+- **Examples**: Check the [examples directory](https://github.com/10xHub/agentflow/tree/main/examples)
+- **Issues**: Report bugs on [GitHub Issues](https://github.com/10xHub/agentflow/issues)
+- **Discussions**: Ask questions in [GitHub Discussions](https://github.com/10xHub/agentflow/discussions)
 
 ---
 
-**Ready to build intelligent agents?** Check out the [documentation](https://10xhub.github.io/10xScale Agentflow/) to get started!
+**Ready to build intelligent agents?** Check out the [documentation](https://10xhub.github.io/Agentflow/) to get started!

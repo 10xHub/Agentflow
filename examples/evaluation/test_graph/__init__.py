@@ -57,7 +57,7 @@ def build_weather_graph():
                 ),
             },
         ],
-        tool_node_name="TOOL",
+        tool_node="TOOL",
     )
 
     # ── Routing ──────────────────────────────────────────────────────
