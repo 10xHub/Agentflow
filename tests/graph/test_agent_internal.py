@@ -281,6 +281,56 @@ class TestDetectProviderFromModel:
         agent = _make_openai_agent()
         assert agent._detect_provider_from_model("deepseek-chat") == "openai"
 
+    def test_unknown_prefix_falls_back_to_openai(self):
+        agent = _make_openai_agent()
+        assert agent._detect_provider_from_model("ollama/llama3") == "openai"
+        assert agent._detect_provider_from_model("anthropic/claude-3") == "openai"
+
+
+class TestResolveProviderAndModel:
+    """``_resolve_provider_and_model`` returns ``(provider, model)``: it strips
+    recognised provider aliases and defaults unknown prefixes to openai."""
+
+    def test_gemini_alias_maps_to_google(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("gemini/gemini-2.5-flash") == (
+            "google",
+            "gemini-2.5-flash",
+        )
+
+    def test_google_alias_maps_to_google(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("google/gemini-2.0-flash") == (
+            "google",
+            "gemini-2.0-flash",
+        )
+
+    def test_openai_alias_maps_to_openai(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("openai/gpt-4o") == ("openai", "gpt-4o")
+
+    def test_gpt_alias_maps_to_openai(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("gpt/gpt-4o") == ("openai", "gpt-4o")
+
+    def test_unknown_prefix_defaults_to_openai_and_keeps_full_model(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("meta-llama/Llama-3-70b") == (
+            "openai",
+            "meta-llama/Llama-3-70b",
+        )
+
+    def test_bare_unknown_model_defaults_to_openai(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("llama3:70b") == ("openai", "llama3:70b")
+
+    def test_use_vertex_ai_forces_google(self):
+        agent = _make_openai_agent()
+        assert agent._resolve_provider_and_model("llama3:70b", use_vertex_ai=True) == (
+            "google",
+            "llama3:70b",
+        )
+
 
 class TestValidateOutputType:
     def test_valid_text_type_does_not_raise(self):
@@ -1954,6 +2004,41 @@ class TestAgentInit:
         with patch.object(Agent, "_create_client", return_value=MagicMock()):
             agent = Agent(model="llama3:70b", reasoning_config=None)
         assert agent.provider == "openai"
+
+    def test_gemini_slash_prefix_maps_to_google_provider(self):
+        """The ``gemini/`` alias must resolve to the ``google`` provider."""
+        with patch.object(Agent, "_create_client", return_value=MagicMock()):
+            agent = Agent(model="gemini/gemini-2.5-flash", reasoning_config=None)
+        assert agent.provider == "google"
+        assert agent.model == "gemini-2.5-flash"
+
+    def test_gpt_slash_prefix_maps_to_openai_provider(self):
+        """The ``gpt/`` alias must resolve to the ``openai`` provider."""
+        with patch.object(Agent, "_create_client", return_value=MagicMock()):
+            agent = Agent(model="gpt/gpt-4o", reasoning_config=None)
+        assert agent.provider == "openai"
+        assert agent.model == "gpt-4o"
+
+    def test_unknown_prefix_resolves_to_openai_and_keeps_full_model(self):
+        """An unrecognised prefix must default to openai, not google, and keep
+        the full model string (it may be an OpenAI-compatible / HF-style name)."""
+        with patch.object(Agent, "_create_client", return_value=MagicMock()):
+            agent = Agent(model="meta-llama/Llama-3-70b", reasoning_config=None)
+        assert agent.provider == "openai"
+        assert agent.model == "meta-llama/Llama-3-70b"
+
+    def test_anthropic_prefix_resolves_to_openai(self):
+        """Claude via an OpenAI-compatible endpoint should not select google."""
+        with patch.object(Agent, "_create_client", return_value=MagicMock()):
+            agent = Agent(model="anthropic/claude-3", reasoning_config=None)
+        assert agent.provider == "openai"
+        assert agent.model == "anthropic/claude-3"
+
+    def test_ollama_prefix_resolves_to_openai(self):
+        with patch.object(Agent, "_create_client", return_value=MagicMock()):
+            agent = Agent(model="ollama/llama3", reasoning_config=None)
+        assert agent.provider == "openai"
+        assert agent.model == "ollama/llama3"
 
     # ── reasoning config normalization ────────────────────────────────────
 

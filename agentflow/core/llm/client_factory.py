@@ -14,6 +14,16 @@ from typing import Any
 
 logger = logging.getLogger("agentflow.llm")
 
+# Recognised ``provider/`` prefixes mapped to the concrete provider the client
+# factory can build. Anything not listed here is an unknown prefix and resolves
+# to ``"openai"`` (the OpenAI SDK is used for OpenAI-compatible endpoints).
+_PROVIDER_PREFIXES = {
+    "gemini": "google",
+    "google": "google",
+    "openai": "openai",
+    "gpt": "openai",
+}
+
 # Keys allowed in the AsyncOpenAI constructor but NOT in per-request calls.
 _CLIENT_CONSTRUCTOR_KWARGS = frozenset(
     {
@@ -44,10 +54,8 @@ def detect_provider(model: str, use_vertex_ai: bool = False) -> str:
 
     if "/" in model:
         prefix = model.split("/", 1)[0].lower()
-        if prefix in ("gemini", "google"):
-            return "google"
-        if prefix in ("openai", "gpt"):
-            return "openai"
+        if prefix in _PROVIDER_PREFIXES:
+            return _PROVIDER_PREFIXES[prefix]
         # Unknown prefix — fall through to name-based detection using the suffix
         model = model.split("/", 1)[1]
 
@@ -62,6 +70,35 @@ def detect_provider(model: str, use_vertex_ai: bool = False) -> str:
         model,
     )
     return "openai"
+
+
+def resolve_provider_and_model(
+    model: str, use_vertex_ai: bool = False
+) -> tuple[str, str]:
+    """Resolve a model string into a concrete ``(provider, model)`` pair.
+
+    Unlike :func:`detect_provider`, this also returns the model name that should
+    be sent to the provider. A *recognised* ``provider/`` prefix (e.g.
+    ``"gemini/..."``, ``"openai/..."``) is stripped, since the provider is
+    selected from the prefix. An *unrecognised* prefix is kept intact: it may be
+    an OpenAI-compatible / HuggingFace-style identifier (e.g.
+    ``"meta-llama/Llama-3-70b"``) where the slash is part of the real model name.
+    Such models always resolve to the ``"openai"`` provider.
+
+    Args:
+        model: Model identifier, optionally prefixed with ``"provider/"``.
+        use_vertex_ai: When True, always selects the ``"google"`` provider.
+
+    Returns:
+        A ``(provider, model)`` tuple where provider is ``"google"`` or
+        ``"openai"``.
+    """
+    if "/" in model:
+        prefix, rest = model.split("/", 1)
+        if prefix.lower() in _PROVIDER_PREFIXES:
+            return detect_provider(model, use_vertex_ai=use_vertex_ai), rest
+
+    return detect_provider(model, use_vertex_ai=use_vertex_ai), model
 
 
 def create_llm_client(

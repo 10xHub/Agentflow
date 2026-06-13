@@ -264,11 +264,6 @@ class Agent(
             **kwargs,
         )
 
-        # check user sending model and provider as prefix, if provider is not explicitly provided
-        if "/" in model and provider is None:
-            provider, model = model.split("/", 1)
-            self.model = model
-
         # Store output type
         self.output_type = output_type.lower()
         self.output_schema = output_schema
@@ -276,15 +271,17 @@ class Agent(
 
         # Determine provider; self.llm_kwargs is set by super().__init__ and is
         # already available here for _create_client().
+        self.base_url = base_url
         if provider is not None:
+            # Provider explicitly supplied — trust it as-is.
             self.provider = provider.lower()
-            self.base_url = base_url
             self.client = self._create_client(self.provider, base_url, use_vertex_ai)
         else:
-            # Auto-detect provider from model name
-            self.provider = self._detect_provider_from_model(model, use_vertex_ai)
-            self.base_url = base_url
-            self.client = self._create_client(self.provider, base_url)
+            # Resolve provider (and strip a recognised ``provider/`` prefix) from
+            # the model string. Unknown prefixes resolve to ``openai`` and keep
+            # the full model name (e.g. OpenAI-compatible/self-hosted models).
+            self.provider, self.model = self._resolve_provider_and_model(model, use_vertex_ai)
+            self.client = self._create_client(self.provider, base_url, use_vertex_ai)
 
         # Validate that provider supports the output type
         self._validate_output_type()
