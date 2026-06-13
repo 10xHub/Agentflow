@@ -805,8 +805,8 @@ MIT License - see [LICENSE](https://github.com/10xHub/agentflow/blob/main/LICENS
 
 ## 🔗 Links & Resources
 
-- **[Documentation](https://10xhub.github.io/Agentflow/)** - Full documentation with tutorials and API reference
-- **[GitHub Repository](https://github.com/10xhub/10xScale Agentflow)** - Source code and issues
+- **[Documentation](https://agentflow.10xscale.ai/)** - Full documentation with tutorials and API reference
+- **[GitHub Repository](https://github.com/10xhub/Agentflow)** - Source code and issues
 - **[PyPI Project](https://pypi.org/project/10xScale-Agentflow/)** - Package releases
 - **[Examples Directory](https://github.com/10xHub/agentflow/tree/main/examples)** - Runnable code samples
 
