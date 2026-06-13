@@ -814,7 +814,7 @@ MIT License - see [LICENSE](https://github.com/10xHub/agentflow/blob/main/LICENS
 
 ## 🙏 Contributing
 
-Contributions are welcome! Please see our [GitHub repository](https://github.com/10xhub/10xScale Agentflow) for:
+Contributions are welcome! Please see our [GitHub repository](https://github.com/10xhub/Agentflow) for:
 
 - Issue reporting and feature requests
 - Pull request guidelines
