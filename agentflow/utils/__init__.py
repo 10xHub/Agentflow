@@ -55,7 +55,12 @@ from .id_generator import (
     TimestampIDGenerator,
     UUIDGenerator,
 )
-from .logging import logger
+from .logging import (
+    SecretRedactionFilter,
+    install_secret_redaction,
+    logger,
+    mask_secrets,
+)
 from .shutdown import (
     DelayedKeyboardInterrupt,
     GracefulShutdownManager,
@@ -101,6 +106,7 @@ __all__ = [
     "OnErrorCallback",
     "PromptInjectionValidator",
     "ResponseGranularity",
+    "SecretRedactionFilter",
     "ShortIDGenerator",
     "TaskMetadata",
     "ThreadInfo",
@@ -114,7 +120,9 @@ __all__ = [
     "delayed_keyboard_interrupt",
     "get_tool_metadata",
     "has_tool_decorator",
+    "install_secret_redaction",
     "logger",
+    "mask_secrets",
     "register_default_validators",
     "replace_messages",
     "replace_value",

@@ -16,6 +16,13 @@ class RetryConfig:
         max_delay: Upper-bound cap on exponential back-off delay (default ``30.0``).
         backoff_factor: Multiplier applied after each retry (default ``2.0``).
         retryable_status_codes: HTTP status codes considered transient/retryable.
+        circuit_breaker_enabled: When True, track failures per (provider, model)
+            and skip a target whose circuit is open, moving straight to the next
+            fallback instead of retrying a known-dead provider (default ``False``).
+        circuit_breaker_threshold: Consecutive failures that open a circuit
+            (default ``5``).
+        circuit_breaker_reset_timeout: Seconds a circuit stays open before a
+            single half-open trial is allowed (default ``30.0``).
     """
 
     max_retries: int = 3
@@ -25,6 +32,9 @@ class RetryConfig:
     retryable_status_codes: frozenset[int] = field(
         default_factory=lambda: frozenset({429, 500, 502, 503, 529}),
     )
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_threshold: int = 5
+    circuit_breaker_reset_timeout: float = 30.0
 
 
 DEFAULT_RETRY_CONFIG = RetryConfig()

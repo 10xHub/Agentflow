@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agentflow.core.graph.agent import Agent
+from agentflow.core.graph.agent_internal.circuit_breaker import CircuitBreakerOpenError
 from agentflow.core.graph.agent_internal.constants import DEFAULT_RETRY_CONFIG, RetryConfig
 
 
@@ -780,3 +781,84 @@ class TestGoogleRetryable:
             )
 
         assert result is response
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Circuit breaker (opt-in via RetryConfig)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+class TestCircuitBreakerIntegration:
+    async def test_disabled_by_default_primary_retried_every_call(self):
+        """Without circuit_breaker_enabled, a dead primary is retried every call."""
+        cfg = RetryConfig(max_retries=0, initial_delay=0.01)
+        agent = _make_agent(retry_config=cfg, fallback_models=["gpt-4o-mini"])
+        original_model = agent.model
+        primary_calls = 0
+
+        async def mock_call_llm(*args, **kwargs):
+            nonlocal primary_calls
+            if agent.model == original_model:
+                primary_calls += 1
+                raise _FakeAPIStatusError(503, "primary_down")
+            return _chat_response("fallback")
+
+        agent._call_llm = AsyncMock(side_effect=mock_call_llm)
+        with patch("agentflow.core.graph.agent_internal.execution.asyncio.sleep", new_callable=AsyncMock):
+            for _ in range(4):
+                await agent._call_llm_with_retry([{"role": "user", "content": "Hi"}])
+
+        # Primary is attempted on every one of the 4 invocations.
+        assert primary_calls == 4
+
+    async def test_open_circuit_skips_dead_primary(self):
+        """After threshold failures the primary is skipped, going straight to fallback."""
+        cfg = RetryConfig(
+            max_retries=0,
+            initial_delay=0.01,
+            circuit_breaker_enabled=True,
+            circuit_breaker_threshold=2,
+        )
+        agent = _make_agent(retry_config=cfg, fallback_models=["gpt-4o-mini"])
+        original_model = agent.model
+        primary_calls = 0
+        fallback_response = _chat_response("fallback")
+
+        async def mock_call_llm(*args, **kwargs):
+            nonlocal primary_calls
+            if agent.model == original_model:
+                primary_calls += 1
+                raise _FakeAPIStatusError(503, "primary_down")
+            return fallback_response
+
+        agent._call_llm = AsyncMock(side_effect=mock_call_llm)
+        with patch("agentflow.core.graph.agent_internal.execution.asyncio.sleep", new_callable=AsyncMock):
+            results = [
+                await agent._call_llm_with_retry([{"role": "user", "content": "Hi"}])
+                for _ in range(4)
+            ]
+
+        # Primary fails on invocations 1 and 2 (opening the circuit at 2), then is
+        # skipped on 3 and 4. Every call still succeeds via the fallback.
+        assert primary_calls == 2
+        assert all(r is fallback_response for r in results)
+
+    async def test_all_circuits_open_raises_circuit_breaker_error(self):
+        """If every model's circuit is open, the recorded CircuitBreakerOpenError is raised."""
+        cfg = RetryConfig(
+            max_retries=0,
+            initial_delay=0.01,
+            circuit_breaker_enabled=True,
+            circuit_breaker_threshold=1,
+        )
+        agent = _make_agent(retry_config=cfg, fallback_models=None)
+        agent._call_llm = AsyncMock(side_effect=_FakeAPIStatusError(503, "down"))
+
+        with patch("agentflow.core.graph.agent_internal.execution.asyncio.sleep", new_callable=AsyncMock):
+            # First call fails normally and opens the circuit (threshold=1).
+            with pytest.raises(_FakeAPIStatusError):
+                await agent._call_llm_with_retry([{"role": "user", "content": "Hi"}])
+            # Second call is short-circuited.
+            with pytest.raises(CircuitBreakerOpenError):
+                await agent._call_llm_with_retry([{"role": "user", "content": "Hi"}])

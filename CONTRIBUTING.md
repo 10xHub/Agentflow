@@ -33,7 +33,7 @@ Run the same checks CI runs. All must pass:
 
 ```bash
 uv run pre-commit run --all-files     # ruff format + lint, bandit, mypy, hooks
-uv run pytest --cov --cov-branch      # tests + coverage gate (>= 70%)
+uv run pytest --cov --cov-branch      # tests + coverage gate (>= 80%)
 ```
 
 You can also run pieces individually:
@@ -54,7 +54,7 @@ uv run pytest tests/graph             # one area
   Improving a listed module's types and removing it from that list is a welcome
   contribution; please don't add new modules to it.
 - **Security:** `bandit`.
-- **Coverage:** `pytest` fails under 70% line coverage. New code needs tests.
+- **Coverage:** `pytest` fails under 80% line coverage. New code needs tests.
 
 ## Tests
 
