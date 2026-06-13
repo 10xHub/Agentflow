@@ -1,5 +1,3 @@
-import random
-
 from dotenv import load_dotenv
 
 from agentflow.core import Agent, StateGraph, ToolNode
@@ -148,6 +146,7 @@ config = {"thread_id": "12345", "recursion_limit": 10}
 
 
 res = app.invoke(inp, config=config)
+print(f"Final Response: {res.keys()}")
 
 for i in res["messages"]:
     print("**********************")
@@ -156,6 +155,9 @@ for i in res["messages"]:
     print("**********************")
     print("\n\n")
 
+
+print("\n\n")
+print(res["token_usage"])
 
 # grp = app.generate_graph()
 

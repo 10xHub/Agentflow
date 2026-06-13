@@ -1,10 +1,18 @@
 
 # 10xScale Agentflow
 
-![PyPI](https://img.shields.io/pypi/v/10xscale-agentflow?color=blue)
-![License](https://img.shields.io/github/license/10xhub/agentflow)
-![Python](https://img.shields.io/pypi/pyversions/10xscale-agentflow)
-[![Coverage](https://img.shields.io/badge/coverage-74%25-yellow.svg)](#)
+[![CI](https://github.com/10xHub/agentflow/actions/workflows/ci.yml/badge.svg)](https://github.com/10xHub/agentflow/actions/workflows/ci.yml)
+[![Release](https://github.com/10xHub/agentflow/actions/workflows/release.yml/badge.svg)](https://github.com/10xHub/agentflow/actions/workflows/release.yml)
+[![CodeQL](https://github.com/10xHub/agentflow/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/10xHub/agentflow/actions/workflows/github-code-scanning/codeql)
+[![codecov](https://codecov.io/gh/10xHub/agentflow/branch/main/graph/badge.svg)](https://codecov.io/gh/10xHub/agentflow)
+
+[![PyPI](https://img.shields.io/pypi/v/10xscale-agentflow?color=blue)](https://pypi.org/project/10xscale-agentflow/)
+[![Python](https://img.shields.io/pypi/pyversions/10xscale-agentflow)](https://pypi.org/project/10xscale-agentflow/)
+[![License](https://img.shields.io/github/license/10xHub/agentflow)](https://github.com/10xHub/agentflow/blob/main/LICENSE)
+[![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](https://codecov.io/gh/10xHub/agentflow)
+[![Tests](https://img.shields.io/badge/tests-2953%20passed-brightgreen.svg)](https://github.com/10xHub/agentflow/actions/workflows/ci.yml)
+[![Status](https://img.shields.io/badge/status-production%2Fstable-brightgreen.svg)](https://pypi.org/project/10xscale-agentflow/)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
 **10xScale Agentflow** is a lightweight Python framework for building intelligent agents and orchestrating multi-agent workflows. It's an **LLM-agnostic orchestration tool** that works with native SDKs from OpenAI, Google Gemini, Anthropic Claude, or any other provider. You choose your LLM library; 10xScale Agentflow provides the workflow orchestration.
 
