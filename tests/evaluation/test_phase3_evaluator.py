@@ -482,3 +482,305 @@ class TestHTMLReporter:
         html = reporter._render_case(result)
         assert "error" in html
         assert "Something went wrong" in html
+
+
+# ============================================================================
+# Additional Reporter Tests for Coverage
+# ============================================================================
+
+from agentflow.qa.evaluation.dataset.eval_set import ToolCall, TrajectoryStep, StepType
+from agentflow.qa.evaluation.eval_result import NodeDetail
+from agentflow.qa.evaluation.token_usage import TokenUsage
+
+class NodeResponseObj:
+    node_name = "object_node"
+    response_text = "hello from object node"
+    tool_call_names = ["other_tool"]
+    is_final = False
+    has_tool_calls = False
+    timestamp = 140.0
+    input_messages = [{"role": "system", "content": "system_prompt"}]
+
+def build_comprehensive_report():
+    # 1. Tool Call
+    tc = ToolCall(
+        name="test_tool",
+        args={"arg1": "val1"},
+        call_id="call_123",
+        result="success_result"
+    )
+
+    # 2. Trajectory Steps
+    step1 = TrajectoryStep(
+        step_type=StepType.TOOL,
+        name="test_tool",
+        args={"arg1": "val1"},
+        timestamp=100.0,
+        metadata={"meta1": "val1"}
+    )
+
+    # 3. Node Response (dict format)
+    nr_dict = {
+        "node_name": "agent_node",
+        "response_text": "hello from node",
+        "tool_call_names": ["test_tool"],
+        "is_final": True,
+        "has_tool_calls": True,
+        "timestamp": 120.0,
+        "input_messages": [{"role": "user", "content": "hello"}]
+    }
+
+    # 4. Node Detail (object format for node_details)
+    node_detail = NodeDetail(
+        node_name="other_node",
+        input_messages=[{"role": "user", "content": "hi"}],
+        response_text="hi response",
+        token_usage=TokenUsage(input_tokens=10, output_tokens=5),
+        timestamp=130.0
+    )
+
+    # 5. Criterion Results
+    cr1 = CriterionResult(
+        criterion="traj_crit",
+        score=0.4,
+        passed=False,
+        threshold=0.8,
+        details={"reason": "traj failed reason", "extra": "extra_detail"},
+        error="eval error message"
+    )
+    cr2 = CriterionResult.success(
+        criterion="resp_crit",
+        score=0.9,
+        threshold=0.8,
+        details={"reason": "resp passed reason"}
+    )
+
+    # 6. Case Results
+    # Result 1: Failed
+    r1 = EvalCaseResult.success(
+        eval_id="case1",
+        name="Case One",
+        criterion_results=[cr1, cr2],
+        actual_trajectory=[step1],
+        actual_tool_calls=[tc],
+        actual_response="Hello world",
+        messages=[{"role": "user", "content": "query"}, {"role": "assistant", "content": "Hello world"}],
+        node_responses=[],
+        node_visits=["start_node", "agent_node"],
+        duration_seconds=2.5,
+        metadata={"case_meta": "meta_val"},
+        turn_results=[{
+            "turn_index": 0,
+            "user_input": "query",
+            "agent_response": "Hello world",
+            "tool_calls": [{"name": "test_tool"}],
+            "node_visits": ["start_node", "agent_node"]
+        }],
+        node_details=[node_detail]
+    )
+    
+    # Assign attributes that bypass basic pydantic constructor validation
+    r1.actual_trajectory = [step1, "simple_trajectory_step"]
+    r1.node_responses = [nr_dict, NodeResponseObj()]
+
+    # Result 2: Error
+    r2 = EvalCaseResult.failure(
+        eval_id="case2",
+        error="Case execution crash",
+        name="Case Two",
+        duration_seconds=1.2
+    )
+
+    # 7. Create report
+    report = EvalReport.create(
+        eval_set_id="test_set_123",
+        eval_set_name="Comprehensive Test Set",
+        results=[r1, r2],
+        config_used={"eval_param": "value"}
+    )
+    report.metadata = {"report_meta": "val"}
+    return report
+
+def test_colors_disable():
+    # Save all original attributes from Colors
+    orig_attrs = {k: getattr(Colors, k) for k in ["RED", "RESET", "BOLD", "DIM", "GREEN", "YELLOW", "BLUE", "MAGENTA", "CYAN", "WHITE", "BG_RED", "BG_GREEN"]}
+    try:
+        Colors.disable()
+        assert Colors.RED == ""
+    finally:
+        for k, v in orig_attrs.items():
+            setattr(Colors, k, v)
+
+def test_json_reporter_quick_save():
+    report = build_comprehensive_report()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "quick.json"
+        JSONReporter.quick_save(report, str(path))
+        assert path.exists()
+
+def test_json_reporter_generate():
+    report = build_comprehensive_report()
+    reporter = JSONReporter()
+    
+    # 1. output_dir = None -> returns JSON string
+    json_str = reporter.generate(report)
+    assert "Comprehensive Test Set" in json_str
+    
+    # 2. output_dir is provided -> saves to file and returns path
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res_path = reporter.generate(report, output_dir=tmpdir)
+        assert Path(res_path).exists()
+        assert res_path.endswith("report.json")
+
+def test_json_reporter_exclusions():
+    report = build_comprehensive_report()
+    
+    # Disable everything
+    reporter = JSONReporter(
+        include_details=False,
+        include_trajectory=False,
+        include_node_responses=False,
+        include_actual_response=False,
+        include_tool_call_details=False,
+    )
+    data = reporter.to_dict(report)
+    
+    for result in data["results"]:
+        assert "actual_trajectory" not in result
+        assert "actual_tool_calls" not in result
+        assert "node_responses" not in result
+        assert "node_details" not in result
+        assert "actual_response" not in result
+        for cr in result.get("criterion_results", []):
+            assert "details" not in cr
+
+def test_junit_reporter_generate():
+    report = build_comprehensive_report()
+    reporter = JUnitXMLReporter()
+    
+    # 1. output_dir = None -> returns XML string
+    xml_str = reporter.generate(report)
+    assert "Comprehensive Test Set" in xml_str
+    
+    # 2. output_dir is provided -> saves to file and returns path
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res_path = reporter.generate(report, output_dir=tmpdir)
+        assert Path(res_path).exists()
+        assert res_path.endswith("junit.xml")
+
+def test_junit_reporter_details():
+    report = build_comprehensive_report()
+    reporter = JUnitXMLReporter()
+    xml_str = reporter.to_xml(report)
+    
+    assert "config_used" in xml_str
+    assert "report_meta" in xml_str
+    assert '<error message="Case execution crash">' in xml_str
+    assert '<failure type="traj_crit"' in xml_str
+    assert "=== Agent Response ===" in xml_str
+    assert "=== Tool Calls" in xml_str
+    assert "=== Trajectory" in xml_str
+    assert "=== Node Visits ===" in xml_str
+    assert "=== Node Responses" in xml_str
+    assert "=== Messages" in xml_str
+    assert "=== Metadata ===" in xml_str
+    assert "=== Turn Results" in xml_str
+    assert "=== Criteria Results ===" in xml_str
+    assert "traj failed reason" in xml_str
+    assert "eval error message" in xml_str
+
+def test_console_reporter_generate():
+    report = build_comprehensive_report()
+    reporter = ConsoleReporter(use_color=False)
+    res = reporter.generate(report)
+    assert res is None
+
+def test_console_reporter_unicode_error():
+    report = build_comprehensive_report()
+    mock_output = MagicMock()
+    mock_output.encoding = "ascii"
+    
+    def write_side_effect(text):
+        if any(ord(c) > 127 for c in text):
+            raise UnicodeEncodeError("ascii", text, 0, len(text), "non-ascii")
+        return len(text)
+        
+    mock_output.write.side_effect = write_side_effect
+    
+    reporter = ConsoleReporter(use_color=False, output=mock_output)
+    reporter.report(report)
+
+def test_console_reporter_partial_stats(capsys):
+    cr_passed = CriterionResult.success(
+        criterion="yellow_crit",
+        score=0.9,
+        threshold=0.8,
+    )
+    cr_failed = CriterionResult.success(
+        criterion="yellow_crit",
+        score=0.5,
+        threshold=0.8,
+    )
+    r1 = EvalCaseResult.success(
+        eval_id="case1",
+        criterion_results=[cr_passed],
+    )
+    r2 = EvalCaseResult.success(
+        eval_id="case2",
+        criterion_results=[cr_failed],
+    )
+    
+    report = EvalReport.create(
+        eval_set_id="partial_set",
+        results=[r1, r2],
+    )
+    report.summary.pass_rate = 0.5
+    report.summary.criterion_stats = {
+        "yellow_crit": {
+            "pass_rate": 0.7,
+            "avg_score": 0.75,
+            "passed": 7,
+            "total": 10,
+        },
+        "red_crit": {
+            "pass_rate": 0.3,
+            "avg_score": 0.35,
+            "passed": 3,
+            "total": 10,
+        }
+    }
+    
+    reporter = ConsoleReporter(use_color=False, verbose=True)
+    reporter.report(report)
+    
+    captured = capsys.readouterr()
+    assert "PARTIAL" in captured.out
+    assert "yellow_crit" in captured.out
+    assert "red_crit" in captured.out
+
+def test_console_reporter_comprehensive_printing(capsys):
+    report = build_comprehensive_report()
+    
+    reporter = ConsoleReporter(
+        use_color=True,
+        verbose=True,
+        include_trajectory=True,
+        include_actual_response=True,
+    )
+    reporter.report(report)
+    
+    captured = capsys.readouterr()
+    assert "Comprehensive Test Set" in captured.out
+    assert "Case One" in captured.out
+    assert "Case Two" in captured.out
+    assert "ERROR" in captured.out
+    assert "Case execution crash" in captured.out
+    assert "case_meta" in captured.out
+    assert "test_tool" in captured.out
+    assert "call_id" in captured.out
+    assert "simple_trajectory_step" in captured.out
+    assert "object_node" in captured.out
+    assert "hello from object node" in captured.out
+    assert "Turn 0:" in captured.out
+    assert "traj failed reason" in captured.out
+    assert "extra_detail" in captured.out

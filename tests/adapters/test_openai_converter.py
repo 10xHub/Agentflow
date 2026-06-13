@@ -438,3 +438,175 @@ class TestTokenUsageDetails:
         assert msg.usages.reasoning_tokens == 0
         assert msg.usages.cache_read_input_tokens == 0
         assert msg.usages.cache_creation_input_tokens == 0
+
+
+@pytest.fixture
+def converter():
+    return OpenAIConverter()
+
+
+@pytest.mark.asyncio
+async def test_openai_converter_import_errors(monkeypatch):
+    monkeypatch.setattr("agentflow.runtime.adapters.llm.openai_converter.HAS_OPENAI", False)
+    converter = OpenAIConverter()
+    
+    with pytest.raises(ImportError, match="openai is not installed"):
+        await converter.convert_response(Mock())
+        
+    with pytest.raises(ImportError, match="openai is not installed"):
+        async for _ in converter.convert_streaming_response({}, "node", Mock()):
+            pass
+
+
+def test_extract_audio_block_exceptions(converter):
+    assert converter._extract_audio_block({"transcript": "hi"}) is None
+    assert converter._extract_audio_block(object()) is None
+
+
+def test_extract_image_blocks_various_types(converter):
+    img = "https://example.com/single.png"
+    blocks = converter._extract_image_blocks(img)
+    assert len(blocks) == 1
+    assert blocks[0].media.url == img
+    
+    with patch("agentflow.runtime.adapters.llm.openai_converter.isinstance", side_effect=TypeError("mock error")):
+        blocks2 = converter._extract_image_blocks("url")
+        assert blocks2 == []
+
+
+@pytest.mark.asyncio
+async def test_streaming_conversion(converter):
+    class MockChunk:
+        def __init__(self, id, content=None, reasoning=None, tool_calls=None):
+            self.id = id
+            self.model = "gpt-4o"
+            
+            delta_obj = type("Delta", (), {
+                "content": content,
+                "reasoning_content": reasoning,
+                "tool_calls": tool_calls,
+                "audio": None,
+                "images": None
+            })
+            choice = type("Choice", (), {
+                "delta": delta_obj
+            })
+            self.choices = [choice]
+
+    chunk1 = MockChunk("chat-1", reasoning="Thinking...")
+    chunk2 = MockChunk("chat-1", content="Hello ")
+    chunk3 = MockChunk("chat-1", content="world!")
+    
+    tool_call_mock = type("ToolCall", (), {
+        "id": "tc-123",
+        "type": "function",
+        "function": type("Func", (), {
+            "name": "calc",
+            "arguments": '{"x": 1}'
+        })
+    })
+    chunk4 = MockChunk("chat-1", tool_calls=[tool_call_mock])
+
+    async def mock_async_stream():
+        yield chunk1
+        yield chunk2
+        yield chunk3
+        yield chunk4
+
+    messages = []
+    async for msg in converter.convert_streaming_response({}, "my_node", mock_async_stream()):
+        messages.append(msg)
+
+    assert len(messages) == 5
+    assert messages[0].reasoning == "Thinking..."
+    assert messages[1].content[0].text == "Hello "
+    assert messages[2].content[0].text == "world!"
+    assert messages[3].tools_calls[0]["id"] == "tc-123"
+    
+    final_msg = messages[-1]
+    assert final_msg.delta is False
+    assert final_msg.reasoning == "Thinking..."
+    assert final_msg.content[0].text == "Hello world!"
+    assert final_msg.content[1].summary == "Thinking..."
+    assert final_msg.content[2].name == "calc"
+
+
+@pytest.mark.asyncio
+async def test_streaming_inline_think_thought(converter):
+    class MockChunk:
+        def __init__(self, id, content):
+            self.id = id
+            delta_obj = type("Delta", (), {
+                "content": content,
+                "reasoning_content": None,
+                "tool_calls": None,
+                "audio": None,
+                "images": None
+            })
+            self.choices = [type("Choice", (), {"delta": delta_obj})]
+
+    async def mock_stream():
+        yield MockChunk("chat-2", "<think>Inline thoughts</think>Actual content")
+
+    messages = []
+    async for msg in converter.convert_streaming_response({}, "node", mock_stream()):
+        messages.append(msg)
+
+    final_msg = messages[-1]
+    assert final_msg.reasoning == "Inline thoughts"
+    assert final_msg.content[0].text == "Actual content"
+
+
+@pytest.mark.asyncio
+async def test_streaming_sync_iterator(converter):
+    class MockChunk:
+        def __init__(self, id, content):
+            self.id = id
+            delta_obj = type("Delta", (), {
+                "content": content,
+                "reasoning_content": None,
+                "tool_calls": None,
+                "audio": None,
+                "images": None
+            })
+            self.choices = [type("Choice", (), {"delta": delta_obj})]
+
+    class SyncStream:
+        def __init__(self, chunks):
+            self.chunks = chunks
+        def __iter__(self):
+            return iter(self.chunks)
+
+    stream = SyncStream([MockChunk("chat-3", "Sync chunk")])
+    messages = []
+    async for msg in converter.convert_streaming_response({}, "node", stream):
+        messages.append(msg)
+
+    assert len(messages) == 2
+    assert messages[0].content[0].text == "Sync chunk"
+
+
+@pytest.mark.asyncio
+async def test_convert_streaming_response_chat_completion(converter):
+    response_data = {
+        "id": "chatcmpl-123",
+        "model": "gpt-4o",
+        "choices": [{"message": {"role": "assistant", "content": "Hello"}}],
+        "usage": {}
+    }
+    response = MockModelResponse(response_data)
+    messages = []
+    with patch("agentflow.runtime.adapters.llm.openai_converter.ChatCompletion", MockModelResponse):
+        async for msg in converter.convert_streaming_response({}, "node", response):
+            messages.append(msg)
+    
+    assert len(messages) == 1
+    assert messages[0].content[0].text == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_convert_streaming_response_unsupported(converter):
+    with pytest.raises(Exception, match="Unsupported response type"):
+        async for _ in converter.convert_streaming_response({}, "node", object()):
+            pass
+

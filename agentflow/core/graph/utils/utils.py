@@ -50,6 +50,7 @@ async def parse_response(
     state: AgentState,
     messages: list[Message],
     response_granularity: ResponseGranularity = ResponseGranularity.LOW,
+    token_usage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Parse and format execution response based on specified granularity level.
 
@@ -83,19 +84,20 @@ async def parse_response(
     match response_granularity:
         case ResponseGranularity.FULL:
             # Return full state and messages
-            return {"state": state, "messages": messages}
+            return {"state": state, "messages": messages, "token_usage": token_usage}
         case ResponseGranularity.PARTIAL:
             # Return state and summary of messages
             return {
                 "context": state.context,
                 "summary": state.context_summary,
-                "message": messages,
+                "messages": messages,
+                "token_usage": token_usage,
             }
         case ResponseGranularity.LOW:
             # Return all messages from state context
-            return {"messages": messages}
+            return {"messages": messages, "token_usage": token_usage}
 
-    return {"messages": messages}
+    return {"messages": messages, "token_usage": token_usage}
 
 
 # Utility to update only provided fields in state
@@ -577,3 +579,60 @@ async def sync_data(
             await checkpointer.aput_messages(config, messages)
 
     return is_context_trimmed
+
+
+def calculate_token_usage(messages: list[Message]) -> dict[str, int]:
+    """Calculate total token usage from all messages in the state.
+
+    Aggregates token usage across all messages in the state's context,
+    including input tokens (prompt_tokens), output tokens (completion_tokens),
+    and reasoning tokens.
+
+    Args:
+        messages: The list of messages containing token usage information.
+
+    Returns:
+        Dictionary containing:
+            - total_input_tokens: Total prompt/input tokens used
+            - total_output_tokens: Total completion/output tokens used
+            - total_reasoning_tokens: Total reasoning tokens used
+            - total_tokens: Sum of input and output tokens
+
+    Example:
+        ```python
+        usage = calculate_token_usage(state)
+        # Returns: {
+        #     "total_input_tokens": 1500,
+        #     "total_output_tokens": 800,
+        #     "total_reasoning_tokens": 200,
+        #     "total_tokens": 2300
+        # }
+        ```
+    """
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_reasoning_tokens = 0
+
+    if not messages:
+        return {
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_reasoning_tokens": total_reasoning_tokens,
+            "total_tokens": total_input_tokens + total_output_tokens,
+        }
+
+    for message in messages:
+        if message.usages:
+            total_input_tokens += message.usages.prompt_tokens
+            total_output_tokens += message.usages.completion_tokens
+            total_reasoning_tokens += message.usages.reasoning_tokens
+
+    # Note: total_tokens is input + output only (reasoning tracked separately)
+    total_tokens = total_input_tokens + total_output_tokens
+
+    return {
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_reasoning_tokens": total_reasoning_tokens,
+        "total_tokens": total_tokens,
+    }
