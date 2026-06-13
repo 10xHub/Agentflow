@@ -34,6 +34,13 @@ def setup_test_environment():
     # Set dummy Google API key for tests
     os.environ.setdefault("GEMINI_API_KEY", "dummy-gemini-key-for-testing-only")
 
+    # Vertex AI selection must NOT be inherited from a developer's .env / shell.
+    # Agent() reads GOOGLE_GENAI_USE_VERTEXAI as the default for use_vertex_ai, so
+    # an ambient "true" would make provider auto-detection resolve to "google" for
+    # every model and break deterministic unit tests. Force it off for the suite;
+    # tests that exercise Vertex pass use_vertex_ai=True explicitly.
+    os.environ.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+
     # Keep tests compatible while core graph transitions from
     # Node(name, func, publisher) to Node(name, func).
     Node.__init__ = _compat_node_init
