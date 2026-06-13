@@ -61,9 +61,9 @@ requires-python = ">=3.12"
 dependencies = [
     "injectq>=0.4.0",
     "pillow>=12.2.0",
-    "pydantic",
-    "PyYAML",
-    "python-dotenv",
+    "pydantic>=2.0,<3",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
 ]
 authors = [
     {name = "10xScale", email = "contact@10xscale.ai"}
@@ -122,6 +122,9 @@ all_publishers = [
 [tool.setuptools.packages.find]
 include = ["agentflow*"]
 exclude = ["normal_tests*", "tests*", "examples*", "docs*"]
+
+[tool.setuptools.package-data]
+agentflow = ["py.typed"]
 
 
 [tool.ruff]
@@ -222,12 +225,67 @@ convention = "google"
 
 
 [tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+namespace_packages = true
+explicit_package_bases = true
+warn_unused_configs = true
 exclude = [
     "normal_tests/*",
     "tests/*",
     "examples/*",
     "docs/*",
 ]
+
+# Phased adoption: mypy was wired into CI after the codebase already existed, so
+# it does not block on the modules that still carry pre-existing type errors.
+# These are still parsed (so downstream type info is available) but their own
+# errors are silenced. Burn the list down by cleaning a module's types and
+# deleting its entry here; everything NOT listed is already gating.
+[[tool.mypy.overrides]]
+module = [
+    "agentflow.core.graph.agent",
+    "agentflow.core.graph.agent_internal.execution",
+    "agentflow.core.graph.agent_internal.google",
+    "agentflow.core.graph.agent_internal.memory",
+    "agentflow.core.graph.agent_internal.openai",
+    "agentflow.core.graph.compiled_graph",
+    "agentflow.core.graph.node",
+    "agentflow.core.graph.state_graph",
+    "agentflow.core.graph.tool_node.base",
+    "agentflow.core.graph.tool_node.mcp_exec",
+    "agentflow.core.graph.tool_node.schema",
+    "agentflow.core.graph.utils.handler_utils",
+    "agentflow.core.graph.utils.invoke_handler",
+    "agentflow.core.graph.utils.invoke_node_handler",
+    "agentflow.core.graph.utils.stream_handler",
+    "agentflow.core.graph.utils.stream_node_handler",
+    "agentflow.core.graph.utils.utils",
+    "agentflow.prebuilt.tools.calculator",
+    "agentflow.prebuilt.tools.fetch",
+    "agentflow.prebuilt.tools.files",
+    "agentflow.prebuilt.tools.memory",
+    "agentflow.prebuilt.tools.search",
+    "agentflow.qa.evaluation.criteria.llm_utils",
+    "agentflow.qa.evaluation.evaluator",
+    "agentflow.qa.evaluation.quick_eval",
+    "agentflow.qa.evaluation.reporters.console",
+    "agentflow.qa.evaluation.reporters._html_render",
+    "agentflow.qa.evaluation.simulators.user_simulator",
+    "agentflow.qa.testing.quick_test",
+    "agentflow.qa.testing.test_agent",
+    "agentflow.runtime.adapters.llm.google_genai_converter",
+    "agentflow.runtime.adapters.llm.model_response_converter",
+    "agentflow.runtime.adapters.llm.openai_converter",
+    "agentflow.runtime.adapters.llm.openai_responses_converter",
+    "agentflow.runtime.publisher.publish",
+    "agentflow.storage.checkpointer.pg_checkpointer",
+    "agentflow.storage.media.processor",
+    "agentflow.storage.store.embedding.google_embedding",
+    "agentflow.storage.store.long_term_memory",
+    "agentflow.storage.store.qdrant_store",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 env = [
@@ -261,7 +319,7 @@ addopts = [
     "--cov-report=html",
     "--cov-report=term-missing",
     "--cov-report=xml",
-    "--cov-fail-under=70",
+    "--cov-fail-under=80",
     "--strict-markers",
     "-v"
 ]
@@ -305,6 +363,8 @@ dev = [
     "pytest-benchmark>=5.1.0",
     "hypothesis>=6.100.0",
     "pre-commit>=3.8.0",
+    "mypy>=1.11.0",
+    "types-PyYAML",
     "asyncpg>=0.30.0",
     "redis>=6.4.0",
     "fastmcp>=2.12.3",

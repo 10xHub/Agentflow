@@ -14,6 +14,69 @@ from typing import Any
 
 logger = logging.getLogger("agentflow.llm")
 
+# Default timeout (in seconds) applied to LLM client construction when the
+# caller does not pass an explicit ``timeout``. Bounds every request so a stalled
+# provider connection cannot hang a graph run indefinitely. Override globally via
+# the ``AGENTFLOW_LLM_TIMEOUT`` environment variable (seconds) or programmatically
+# via :func:`set_default_llm_timeout`.
+DEFAULT_LLM_TIMEOUT_SECONDS = 600.0
+
+# Single-element holder so the override can be mutated without a ``global``
+# statement (which ruff's PLW0603 flags).
+_default_timeout_override: dict[str, float | None] = {"value": None}
+
+
+def _env_timeout() -> float | None:
+    """Read ``AGENTFLOW_LLM_TIMEOUT`` (seconds), or None if unset/invalid."""
+    raw = os.getenv("AGENTFLOW_LLM_TIMEOUT")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid AGENTFLOW_LLM_TIMEOUT=%r; expected a number of seconds. Ignoring.",
+            raw,
+        )
+        return None
+    if value <= 0:
+        logger.warning("AGENTFLOW_LLM_TIMEOUT=%s must be positive. Ignoring.", value)
+        return None
+    return value
+
+
+def get_default_llm_timeout() -> float:
+    """Return the default LLM request timeout in seconds.
+
+    Resolution order (first match wins):
+
+    1. A programmatic override set via :func:`set_default_llm_timeout`.
+    2. The ``AGENTFLOW_LLM_TIMEOUT`` environment variable (seconds).
+    3. :data:`DEFAULT_LLM_TIMEOUT_SECONDS`.
+    """
+    override = _default_timeout_override["value"]
+    if override is not None:
+        return override
+    env = _env_timeout()
+    if env is not None:
+        return env
+    return DEFAULT_LLM_TIMEOUT_SECONDS
+
+
+def set_default_llm_timeout(seconds: float | None) -> None:
+    """Globally override the default LLM request timeout, in seconds.
+
+    Pass ``None`` to clear the override and fall back to the
+    ``AGENTFLOW_LLM_TIMEOUT`` environment variable / built-in default.
+
+    Raises:
+        ValueError: If ``seconds`` is not a positive number.
+    """
+    if seconds is not None and seconds <= 0:
+        raise ValueError("LLM timeout must be a positive number of seconds.")
+    _default_timeout_override["value"] = seconds
+
+
 # Recognised ``provider/`` prefixes mapped to the concrete provider the client
 # factory can build. Anything not listed here is an unknown prefix and resolves
 # to ``"openai"`` (the OpenAI SDK is used for OpenAI-compatible endpoints).
@@ -141,11 +204,15 @@ def create_llm_client(
 def _create_google_client(*, use_vertex_ai: bool) -> Any:
     try:
         from google import genai
+        from google.genai.types import HttpOptions
     except ImportError as exc:
         raise ImportError(
             "google-genai SDK is required for the Google provider. "
             "Install it with: pip install 10xscale-agentflow[google-genai]"
         ) from exc
+
+    # google-genai expresses the request timeout in milliseconds.
+    http_options = HttpOptions(timeout=int(get_default_llm_timeout() * 1000))
 
     if use_vertex_ai:
         project = os.getenv("GOOGLE_CLOUD_PROJECT")
@@ -157,7 +224,9 @@ def _create_google_client(*, use_vertex_ai: bool) -> Any:
             project,
             location,
         )
-        return genai.Client(vertexai=True, project=project, location=location)
+        return genai.Client(
+            vertexai=True, project=project, location=location, http_options=http_options
+        )
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
@@ -170,7 +239,7 @@ def _create_google_client(*, use_vertex_ai: bool) -> Any:
     # GOOGLE_GENAI_USE_VERTEXAI env var and silently switches to Vertex mode,
     # which rejects API keys (401 UNAUTHENTICATED). The caller asked for the
     # Developer API (use_vertex_ai=False), so honour that over the env.
-    return genai.Client(vertexai=False, api_key=api_key)
+    return genai.Client(vertexai=False, api_key=api_key, http_options=http_options)
 
 
 def _create_openai_client(
@@ -195,6 +264,8 @@ def _create_openai_client(
         )
 
     client_kwargs = {k: v for k, v in extra_kwargs.items() if k in _CLIENT_CONSTRUCTOR_KWARGS}
+    # Bound the request unless the caller opted into their own timeout.
+    client_kwargs.setdefault("timeout", get_default_llm_timeout())
     if base_url:
         logger.info("Creating OpenAI client with custom base_url: %s", base_url)
         return AsyncOpenAI(api_key=resolved_key, base_url=base_url, **client_kwargs)

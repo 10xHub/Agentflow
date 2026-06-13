@@ -24,7 +24,7 @@ persistence, tools, memory, evaluation, and event publishing. Inspired by LangGr
   the README and several docstrings still show pre-refactor paths (see Known Doc Drift).
 - **Surgical edits.** This is `Development Status :: 5 - Production/Stable`. Don't refactor
   module boundaries or rename exports without checking every `__init__.py` that re-exports them.
-- **Keep coverage green.** `pytest` enforces `--cov-fail-under=70`. New code needs tests.
+- **Keep coverage green.** `pytest` enforces `--cov-fail-under=80`. New code needs tests.
 - **Optional deps are optional.** Provider SDKs, MCP, Postgres, Redis, Qdrant, Mem0, Kafka,
   RabbitMQ, OTEL, a2a are all extras. Guard imports; never make core import a hard optional dep.
 
@@ -152,7 +152,7 @@ already present.
 
 ```bash
 # from this folder (agentflow/)
-.venv/bin/python -m pytest               # full suite (enforces coverage >= 70%)
+.venv/bin/python -m pytest               # full suite (enforces coverage >= 80%)
 .venv/bin/python -m pytest tests/graph   # one area
 ruff check . && ruff format .            # lint + format (line-length 100, py312)
 # editable install with extras for local dev:

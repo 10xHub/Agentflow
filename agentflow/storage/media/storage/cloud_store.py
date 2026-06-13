@@ -250,7 +250,13 @@ class CloudMediaStore(BaseMediaStore):
             url = await self._storage.get_public_url(meta_path, expiration=60)
             raw = await self._download_from_url(url)
             return json.loads(raw)
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Could not download/parse sidecar metadata at %s (%s: %s)",
+                meta_path,
+                type(exc).__name__,
+                exc,
+            )
             return None
 
     @staticmethod

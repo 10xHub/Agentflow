@@ -50,3 +50,16 @@ repos:
         args: [-c, pyproject.toml]
         additional_dependencies: ["bandit[toml]"]
         exclude: ^(tests|docs|examples)/
+
+  # Run mypy from the project venv (synced via `uv sync --dev`) so it resolves
+  # real dependencies and honours the [tool.mypy] config in pyproject.toml.
+  # Checks the whole package once (pass_filenames: false) rather than per-file.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy agentflow/
+        language: system
+        types: [python]
+        pass_filenames: false
+        exclude: ^(tests|docs|examples|normal_tests)/

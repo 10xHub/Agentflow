@@ -18,6 +18,7 @@ from agentflow.utils.converter import (
     strip_media_blocks,
 )
 
+from .circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from .constants import RetryConfig
 
 
@@ -255,7 +256,37 @@ class AgentExecutionMixin:
             for keyword in ("timeout", "connection", "unavailable", "serviceunav")
         )
 
-    async def _call_llm_with_retry(  # noqa: PLR0912
+    def _get_circuit_breaker(
+        self,
+        provider: str,
+        model: str,
+        retry_cfg: RetryConfig | None,
+    ) -> CircuitBreaker | None:
+        """Return the circuit breaker for ``(provider, model)``, or None if disabled.
+
+        Breakers are created lazily and cached on the instance so their state
+        persists across calls (the whole point: stop hammering a dead provider on
+        every invocation).
+        """
+        if retry_cfg is None or not retry_cfg.circuit_breaker_enabled:
+            return None
+        registry: dict[tuple[str, str], CircuitBreaker] | None = self.__dict__.get(
+            "_circuit_breakers"
+        )
+        if registry is None:
+            registry = {}
+            self._circuit_breakers = registry
+        key = (provider, model)
+        breaker = registry.get(key)
+        if breaker is None:
+            breaker = CircuitBreaker(
+                failure_threshold=retry_cfg.circuit_breaker_threshold,
+                reset_timeout=retry_cfg.circuit_breaker_reset_timeout,
+            )
+            registry[key] = breaker
+        return breaker
+
+    async def _call_llm_with_retry(  # noqa: PLR0912, PLR0915
         self,
         messages: list[dict[str, Any]],
         tools: list | None = None,
@@ -297,6 +328,18 @@ class AgentExecutionMixin:
                     provider,
                 )
 
+            breaker = self._get_circuit_breaker(provider, model, retry_cfg)
+            if breaker is not None and not breaker.allow():
+                retry_after = breaker.retry_after()
+                logger.warning(
+                    "Circuit open for %s (provider=%s); skipping (retry in %.1fs)",
+                    model,
+                    provider,
+                    retry_after,
+                )
+                last_exc = CircuitBreakerOpenError((provider, model), retry_after)
+                continue
+
             for retry in range(max_retries + 1):  # 0 .. max_retries
                 try:
                     if is_fallback:
@@ -331,6 +374,8 @@ class AgentExecutionMixin:
                     else:
                         result = await self._call_llm(messages, tools, stream, **kwargs)
 
+                    if breaker is not None:
+                        breaker.record_success()
                     if is_fallback or retry > 0:
                         logger.info(
                             "LLM call succeeded on %s (attempt %d/%d, model_index=%d)",
@@ -373,6 +418,11 @@ class AgentExecutionMixin:
                             max_retries + 1,
                             model,
                         )
+
+            # This model's attempt cycle failed (retries exhausted or
+            # non-retryable). Record one failure against its circuit.
+            if breaker is not None:
+                breaker.record_failure()
 
         # Every model exhausted → re-raise the last exception
         assert last_exc is not None  # noqa: S101

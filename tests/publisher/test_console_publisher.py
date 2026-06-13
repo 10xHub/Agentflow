@@ -322,6 +322,34 @@ class TestConsolePublisherPublishMethod:
             assert part in printed_msg
     
     @pytest.mark.asyncio
+    async def test_publish_uses_logger_when_configured(self, caplog):
+        """With use_logger=True, events go through the logger, not stdout."""
+        publisher = ConsolePublisher({"use_logger": True})
+        assert publisher.use_logger is True
+
+        event = EventModel(
+            event=Event.GRAPH_EXECUTION,
+            event_type=EventType.START,
+            node_name="logger_node",
+            data={"key": "value"},
+            metadata={"user": "test_user"},
+        )
+
+        with patch('builtins.print') as mock_print:
+            with caplog.at_level(logging.INFO, logger="agentflow.publisher"):
+                await publisher.publish(event)
+
+            # Routed to the logger, never to stdout
+            mock_print.assert_not_called()
+
+        assert "logger_node.start" in caplog.text
+        assert "{'key': 'value'}" in caplog.text
+
+    def test_use_logger_defaults_to_false(self):
+        """Default sink is stdout (use_logger is False)."""
+        assert ConsolePublisher().use_logger is False
+
+    @pytest.mark.asyncio
     @patch('builtins.print')
     async def test_publish_with_unicode_content(self, mock_print):
         """Test publishing with unicode content."""

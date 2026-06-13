@@ -178,7 +178,12 @@ class MediaProcessor:
         raw = base64.b64decode(block.media.data_base64)
         try:
             return Image.open(io.BytesIO(raw))
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "Could not open inline image for orientation fix (%s: %s); skipping",
+                type(exc).__name__,
+                exc,
+            )
             return None
 
     @staticmethod
