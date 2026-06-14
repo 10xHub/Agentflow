@@ -36,6 +36,7 @@ class Event(StrEnum):
     LLM_CALL = "llm_call"
     TOOL_EXECUTION = "tool_execution"
     STREAMING = "streaming"
+    REALTIME = "realtime"
 
 
 class EventType(StrEnum):
@@ -86,6 +87,7 @@ class ContentType(StrEnum):
     TOOL_RESULT = "tool_result"
     IMAGE = "image"
     AUDIO = "audio"
+    TRANSCRIPT = "transcript"
     VIDEO = "video"
     DOCUMENT = "document"
     DATA = "data"

@@ -32,10 +32,12 @@ class TestEventEnums:
         assert Event.TOOL_EXECUTION.value == "tool_execution"
         assert Event.STREAMING.value == "streaming"
         
+        assert Event.REALTIME.value == "realtime"
+
         # Test all expected values are present
         expected_values = {
             "graph_execution", "node_execution", "llm_call",
-            "tool_execution", "streaming"
+            "tool_execution", "streaming", "realtime"
         }
         actual_values = {event.value for event in Event}
         assert actual_values == expected_values
@@ -73,12 +75,13 @@ class TestEventEnums:
         assert ContentType.STATE.value == "state"
         assert ContentType.UPDATE.value == "update"
         assert ContentType.ERROR.value == "error"
-        
+        assert ContentType.TRANSCRIPT.value == "transcript"
+
         # Test all expected values are present
         expected_values = {
             "text", "message", "reasoning", "tool_call", "tool_result",
-            "image", "audio", "video", "document", "data", 
-            "state", "update", "error"
+            "image", "audio", "video", "document", "data",
+            "state", "update", "error", "transcript"
         }
         actual_values = {content_type.value for content_type in ContentType}
         assert actual_values == expected_values
