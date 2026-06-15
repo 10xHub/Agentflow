@@ -51,28 +51,10 @@ jobs:
           name: dist
           path: dist/
 
-  # 2. Publish to PyPI via Trusted Publishing (OIDC, no API token needed).
-  pypi:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/10xscale-agentflow/
-    permissions:
-      id-token: write  # required for trusted publishing
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-
-  # 3. Create the GitHub Release with auto-generated notes and attach artifacts.
+  # 2. Create the GitHub Release with auto-generated notes and attach artifacts.
+  #    PyPI publishing is handled manually (see Makefile: `make publish`).
   github-release:
-    needs: pypi
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write  # required to create a release
