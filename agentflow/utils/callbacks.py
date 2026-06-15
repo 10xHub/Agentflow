@@ -331,6 +331,34 @@ class GraphLifecycleHook[StateT]:
         """
         return None
 
+    async def on_turn_start(
+        self,
+        context: "GraphLifecycleContext",
+        state: StateT,
+        turn_index: int,
+    ) -> "StateT | None":
+        """Called when a new realtime conversation turn begins (realtime sessions only).
+
+        A "turn" spans one model generation, bounded by the provider's turn-complete (or a
+        barge-in). ``turn_index`` is 1-based. Return a modified StateT to replace the current
+        state, or None to keep it. Never fired by turn-based invoke/stream runs.
+        """
+        return None
+
+    async def on_turn_end(
+        self,
+        context: "GraphLifecycleContext",
+        state: StateT,
+        turn_index: int,
+    ) -> "StateT | None":
+        """Called when a realtime conversation turn completes or is interrupted.
+
+        ``turn_index`` is the 1-based index of the turn that just ended. Return a modified
+        StateT to replace the current state, or None to keep it. Never fired by turn-based
+        invoke/stream runs.
+        """
+        return None
+
 
 class CallbackManager:
     """
@@ -945,4 +973,46 @@ class CallbackManager:
                 extra={"lifecycle": "state_update", "step": step},
             )
         )
+        return result
+
+    async def fire_on_turn_start(
+        self,
+        context: GraphLifecycleContext,
+        state: StateT,
+        turn_index: int,
+    ) -> StateT:
+        """Fire all on_turn_start hooks and return the (potentially modified) state."""
+        result = state
+        for hook in self._lifecycle_hooks:
+            try:
+                modified = await hook.on_turn_start(context, result, turn_index)
+                if modified is not None:
+                    result = modified
+            except Exception as e:
+                logger.exception(
+                    "Lifecycle hook %s.on_turn_start failed: %s",
+                    hook.__class__.__name__,
+                    e,
+                )
+        return result
+
+    async def fire_on_turn_end(
+        self,
+        context: GraphLifecycleContext,
+        state: StateT,
+        turn_index: int,
+    ) -> StateT:
+        """Fire all on_turn_end hooks and return the (potentially modified) state."""
+        result = state
+        for hook in self._lifecycle_hooks:
+            try:
+                modified = await hook.on_turn_end(context, result, turn_index)
+                if modified is not None:
+                    result = modified
+            except Exception as e:
+                logger.exception(
+                    "Lifecycle hook %s.on_turn_end failed: %s",
+                    hook.__class__.__name__,
+                    e,
+                )
         return result

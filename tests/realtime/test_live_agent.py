@@ -29,6 +29,7 @@ from agentflow.core.state import AgentState, Message
 from agentflow.runtime.publisher.base_publisher import BasePublisher
 from agentflow.utils import CallbackManager
 from agentflow.utils.background_task_manager import BackgroundTaskManager
+from agentflow.utils.callbacks import GraphLifecycleHook
 
 MODEL = "gemini-2.5-flash-live"
 
@@ -40,6 +41,7 @@ class FakeRealtimeClient:
         self.connected_config = None
         self.sent_audio: list[tuple[bytes, int]] = []
         self.sent_text: list[str] = []
+        self.sent_images: list[tuple[bytes, str]] = []
         self.activity: list[str] = []
         self.tool_responses: list[tuple[str, str, object]] = []
         self.reseeded = None
@@ -54,6 +56,9 @@ class FakeRealtimeClient:
 
     async def send_text(self, text):
         self.sent_text.append(text)
+
+    async def send_image(self, data, mime_type):
+        self.sent_images.append((data, mime_type))
 
     async def send_activity_start(self):
         self.activity.append("start")
@@ -126,6 +131,7 @@ class TestDuplexLoop:
         q = LiveInputQueue()
         q.send_audio(b"x", sample_rate=16000)
         q.send_text("hi")
+        q.send_image(b"\xff\xd8\xff", mime_type="image/jpeg")
         q.send_activity_start()
         q.send_activity_end()
         q.close()
@@ -134,6 +140,7 @@ class TestDuplexLoop:
 
         assert client.sent_audio == [(b"x", 16000)]
         assert client.sent_text == ["hi"]
+        assert client.sent_images == [(b"\xff\xd8\xff", "image/jpeg")]
         assert client.activity == ["start", "end"]
 
 
@@ -380,6 +387,41 @@ class TestReconnectBackoff:
         assert fatal[0].fatal is True
         assert fatal[0].code == "reconnect_failed"
 
+    def test_reconnect_settings_seeded_from_realtime_config(self):
+        from agentflow.core.realtime.base import ReconnectConfig
+
+        cfg = RealtimeConfig(
+            model=MODEL,
+            reconnect=ReconnectConfig(base_delay=0.1, max_delay=2.0, max_attempts=2),
+        )
+        agent = LiveAgent(MODEL, realtime_config=cfg)
+
+        assert agent._reconnect_base_delay == 0.1
+        assert agent._reconnect_max_delay == 2.0
+        assert agent._reconnect_max_attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_max_attempts_zero_disables_error_driven_reconnect(self):
+        from agentflow.core.realtime.base import ReconnectConfig
+
+        class DroppingClient(FakeRealtimeClient):
+            attempts = 0
+
+            async def receive(self):
+                DroppingClient.attempts += 1
+                raise ConnectionError("socket dropped")
+                yield  # pragma: no cover - makes this an async generator
+
+        cfg = RealtimeConfig(model=MODEL, reconnect=ReconnectConfig(max_attempts=0))
+        agent = LiveAgent(MODEL, realtime_config=cfg, realtime_client_factory=DroppingClient)
+        q = LiveInputQueue()  # left open: reconnect would be allowed if not disabled
+
+        events = await _drain(agent, q, {"thread_id": "t-no-retry"})
+
+        # The first drop is fatal immediately; the socket is never reopened.
+        assert DroppingClient.attempts == 1
+        assert [e for e in events if e.type == "error"][0].code == "reconnect_failed"
+
 
 class TestSessionConfig:
     @pytest.mark.asyncio
@@ -406,6 +448,170 @@ class TestSessionConfig:
         await _drain(agent, _closed_queue(), {"thread_id": "t1"})
 
         assert client.connected_config is agent.realtime_config
+
+
+class TestSystemInstruction:
+    @pytest.mark.asyncio
+    async def test_system_prompt_flattened_into_system_instruction(self):
+        client = FakeRealtimeClient([TurnCompleteEvent()])
+        agent = LiveAgent(
+            MODEL,
+            system_prompt=[
+                {"role": "system", "content": "You are a pirate."},
+                {"role": "system", "content": "Always answer in one sentence."},
+            ],
+            realtime_client_factory=_factory(client),
+        )
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"})
+
+        assert client.connected_config.system_instruction == (
+            "You are a pirate.\n\nAlways answer in one sentence."
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_system_instruction_preserved_when_no_system_prompt(self):
+        client = FakeRealtimeClient([TurnCompleteEvent()])
+        cfg = RealtimeConfig(model=MODEL, system_instruction="Be terse.")
+        agent = LiveAgent(MODEL, realtime_config=cfg, realtime_client_factory=_factory(client))
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"})
+
+        assert client.connected_config.system_instruction == "Be terse."
+
+    @pytest.mark.asyncio
+    async def test_no_system_prompt_leaves_instruction_unset(self):
+        client = FakeRealtimeClient([TurnCompleteEvent()])
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"})
+
+        assert client.connected_config.system_instruction is None
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_interpolates_state_fields(self):
+        class _State(AgentState):
+            user_name: str = ""
+
+        client = FakeRealtimeClient([TurnCompleteEvent()])
+        agent = LiveAgent(
+            MODEL,
+            system_prompt=[{"role": "system", "content": "You assist {user_name}."}],
+            realtime_client_factory=_factory(client),
+        )
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"}, state=_State(user_name="Ada"))
+
+        assert client.connected_config.system_instruction == "You assist Ada."
+
+    @pytest.mark.asyncio
+    async def test_session_skill_content_reaches_system_instruction(self, tmp_path):
+        from agentflow.core.skills.models import SkillConfig
+
+        skill_dir = tmp_path / "weather"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: weather\ndescription: weather skill\n---\nCheck the forecast first.",
+            encoding="utf-8",
+        )
+
+        class _State(AgentState):
+            active_skill: str = ""
+
+        client = FakeRealtimeClient([TurnCompleteEvent()])
+        agent = LiveAgent(
+            MODEL,
+            system_prompt=[{"role": "system", "content": "Base prompt."}],
+            skills=SkillConfig(mode="session", preload_from="active_skill", skills_dir=str(tmp_path)),
+            realtime_client_factory=_factory(client),
+        )
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"}, state=_State(active_skill="weather"))
+
+        # Both the base prompt and the preloaded skill body reach the single instruction.
+        assert "Base prompt." in client.connected_config.system_instruction
+        assert "Check the forecast first." in client.connected_config.system_instruction
+
+
+class _RecordingHook(GraphLifecycleHook):
+    def __init__(self):
+        self.calls = []
+
+    async def on_graph_start(self, ctx, state):
+        self.calls.append(("graph_start", None))
+
+    async def on_graph_end(self, ctx, final_state, messages, total_steps):
+        self.calls.append(("graph_end", total_steps))
+
+    async def on_turn_start(self, ctx, state, turn_index):
+        self.calls.append(("turn_start", turn_index))
+
+    async def on_turn_end(self, ctx, state, turn_index):
+        self.calls.append(("turn_end", turn_index))
+
+
+class TestLifecycleHooks:
+    @pytest.mark.asyncio
+    async def test_session_and_turn_hooks_fire_in_order(self):
+        cm = CallbackManager()
+        hook = _RecordingHook()
+        cm.register_lifecycle_hook(hook)
+
+        # Two model turns, each: content then turn_complete.
+        client = FakeRealtimeClient(
+            [
+                AudioDeltaEvent(data=b"\x01"),
+                TurnCompleteEvent(),
+                AudioDeltaEvent(data=b"\x02"),
+                TurnCompleteEvent(),
+            ]
+        )
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"}, callback_manager=cm)
+
+        assert hook.calls == [
+            ("graph_start", None),
+            ("turn_start", 1),
+            ("turn_end", 1),
+            ("turn_start", 2),
+            ("turn_end", 2),
+            ("graph_end", 2),  # total_steps == number of turns
+        ]
+
+    @pytest.mark.asyncio
+    async def test_turn_cut_off_by_session_end_still_balances(self):
+        # Content arrives but no turn_complete before the session ends; on_turn_end must still
+        # fire so every on_turn_start is balanced, then on_graph_end closes the session.
+        cm = CallbackManager()
+        hook = _RecordingHook()
+        cm.register_lifecycle_hook(hook)
+
+        client = FakeRealtimeClient([AudioDeltaEvent(data=b"\x01")])
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"}, callback_manager=cm)
+
+        assert hook.calls == [
+            ("graph_start", None),
+            ("turn_start", 1),
+            ("turn_end", 1),
+            ("graph_end", 1),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_control_only_session_fires_no_turn_hooks(self):
+        # A session with only control frames (no content) opens no turn.
+        cm = CallbackManager()
+        hook = _RecordingHook()
+        cm.register_lifecycle_hook(hook)
+
+        client = FakeRealtimeClient([SessionUpdateEvent(resumption_handle="h1")])
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        await _drain(agent, _closed_queue(), {"thread_id": "t1"}, callback_manager=cm)
+
+        assert hook.calls == [("graph_start", None), ("graph_end", 0)]
 
 
 class TestToolAdvertising:

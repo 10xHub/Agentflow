@@ -23,7 +23,7 @@ from agentflow.core.realtime.base import INPUT_SAMPLE_RATE
 
 logger = logging.getLogger(__name__)
 
-LiveInputKind = Literal["audio", "text", "activity_start", "activity_end", "close"]
+LiveInputKind = Literal["audio", "text", "image", "activity_start", "activity_end", "close"]
 
 
 @dataclass(slots=True)
@@ -31,13 +31,15 @@ class LiveInput:
     """A single upstream transport frame. Construct via ``LiveInputQueue.send_*``.
 
     ``kind`` discriminates the frame; only the fields relevant to that kind are set
-    (``data``/``sample_rate`` for audio, ``text`` for text, neither for control frames).
+    (``data``/``sample_rate`` for audio, ``data``/``mime_type`` for image, ``text`` for
+    text, none for control frames).
     """
 
     kind: LiveInputKind
     data: bytes | None = None
     text: str | None = None
     sample_rate: int = INPUT_SAMPLE_RATE
+    mime_type: str | None = None
 
 
 class LiveInputQueue:
@@ -70,6 +72,15 @@ class LiveInputQueue:
 
     def send_text(self, text: str) -> None:
         self._put(LiveInput(kind="text", text=text))
+
+    def send_image(self, data: bytes, mime_type: str = "image/jpeg") -> None:
+        """Send a single image frame (e.g. a JPEG camera frame) into the live session.
+
+        Gemini Live accepts still images and video as individual frames; send video as a
+        stream of frames (~1 fps is the model's effective ceiling). ``mime_type`` must be an
+        image type the provider supports (default ``image/jpeg``).
+        """
+        self._put(LiveInput(kind="image", data=data, mime_type=mime_type))
 
     def send_activity_start(self) -> None:
         self._put(LiveInput(kind="activity_start"))

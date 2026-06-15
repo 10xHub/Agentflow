@@ -9,6 +9,7 @@ def test_public_symbols_are_exported():
         "RealtimeConfig",
         "RealtimeEvent",
         "VADConfig",
+        "ReconnectConfig",
         "AudioDeltaEvent",
         "InputTranscriptEvent",
         "OutputTranscriptEvent",

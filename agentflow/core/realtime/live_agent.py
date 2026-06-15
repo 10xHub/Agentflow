@@ -43,6 +43,15 @@ from agentflow.core.state import AgentState, Message, TextBlock, add_messages
 from agentflow.runtime.publisher.events import ContentType, Event, EventModel, EventType
 from agentflow.runtime.publisher.publish import publish_event
 from agentflow.utils import CallbackManager
+from agentflow.utils.callbacks import GraphLifecycleContext
+
+
+# Event kinds that constitute model/user turn content. A turn starts on the first of these
+# after a turn boundary and ends on turn_complete/interrupted; control frames (session_update,
+# go_away, error) never open a turn.
+_TURN_CONTENT_TYPES = frozenset(
+    {"audio_delta", "input_transcript", "output_transcript", "tool_call", "tool_result"}
+)
 
 
 if TYPE_CHECKING:
@@ -118,10 +127,12 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         self._output_transcript_buf = ""
 
         # Error-driven reconnect backoff (go_away reconnects are immediate; only transient
-        # drops back off). Instance attributes so tests can shrink them.
-        self._reconnect_base_delay = 0.5
-        self._reconnect_max_delay = 10.0
-        self._reconnect_max_attempts = 5
+        # drops back off). Seeded from RealtimeConfig.reconnect; kept as instance attributes
+        # so tests can shrink them without rebuilding the config.
+        rc = self.realtime_config.reconnect
+        self._reconnect_base_delay = rc.base_delay
+        self._reconnect_max_delay = rc.max_delay
+        self._reconnect_max_attempts = rc.max_attempts
 
         # Builder mixins (no-op when their config is None).
         self._setup_memory(memory)
@@ -150,7 +161,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
     # ------------------------------------------------------------------ #
     # The duplex realtime loop.
     # ------------------------------------------------------------------ #
-    async def arun(
+    async def arun(  # noqa: PLR0912, PLR0915
         self,
         input_queue: LiveInputQueue,
         config: dict[str, Any],
@@ -168,6 +179,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         self._output_transcript_buf = ""
         rt = self._session_realtime_config(config)
         rt = await self._resolve_session_tools(rt)
+        rt = await self._resolve_session_system_instruction(rt, state, config)
 
         handle = await self._load_resume_handle(config, checkpointer)
         client = self._client_factory()
@@ -177,11 +189,17 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         # model would receive the whole conversation twice (handle restore + reseed).
         await self._maybe_reseed(config, checkpointer, context_manager, resumed=handle is not None)
 
+        # Session start mirrors a graph run: the LIVE node *is* the graph, so on_graph_start
+        # fires once here (before any turn) and on_graph_end once when the session ends.
+        state = await self._fire_graph_start(callback_manager, config, state)
+
         # Closing the input queue ends the session: the pump sets this when it drains the
         # close sentinel, and the receive loop stops once the provider goes idle.
         stop_event = asyncio.Event()
         pump_task = asyncio.create_task(self._pump(input_queue, stop_event))
         attempts = 0  # consecutive error-driven reconnect attempts (reset on healthy receive)
+        turn_index = 0  # 1-based count of turns started; doubles as on_graph_end total_steps
+        turn_active = False  # a turn is open (content seen, no turn_complete/interrupt yet)
         try:
             while True:
                 reconnect = False
@@ -190,16 +208,29 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                 try:
                     async for event in self._receive_until_stop(self._active_client, stop_event):
                         received_any = True
+                        if not turn_active and event.type in _TURN_CONTENT_TYPES:
+                            turn_index += 1
+                            turn_active = True
+                            state = await self._fire_turn_start(
+                                callback_manager, config, state, turn_index
+                            )
                         for out in await self._handle_event(
                             event, config, state, checkpointer, callback_manager
                         ):
                             yield out
+                        if turn_active and event.type in ("turn_complete", "interrupted"):
+                            state = await self._fire_turn_end(
+                                callback_manager, config, state, turn_index
+                            )
+                            turn_active = False
                         if event.type == "go_away":
                             reconnect = True
                             forced = True
                             break
                         if event.type == "error" and getattr(event, "fatal", False):
-                            return
+                            # break (not return) so on_graph_end still fires for the session.
+                            reconnect = False
+                            break
                 except Exception:
                     # Transient drop: only resume if input is still open (avoid an
                     # infinite reconnect storm once the session is shutting down).
@@ -218,6 +249,11 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                 if fatal is not None:
                     yield fatal
                     break
+
+            # Balance a turn cut off by session end (no turn_complete arrived), then close out.
+            if turn_active:
+                state = await self._fire_turn_end(callback_manager, config, state, turn_index)
+            await self._fire_graph_end(callback_manager, config, state, turn_index)
         finally:
             pump_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -257,6 +293,42 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         if not schemas:
             return rt
         return rt.model_copy(update={"tools": schemas})
+
+    async def _resolve_session_system_instruction(
+        self, rt: RealtimeConfig, state: AgentState, config: dict[str, Any]
+    ) -> RealtimeConfig:
+        """Flatten the agent's system prompt (+ skills + memory) into ``system_instruction``.
+
+        Gemini Live takes a single ``system_instruction`` string fixed at connect time, so
+        the per-turn prompt list other agents send must be collapsed once, here. This is what
+        makes ``system_prompt``, the skills trigger table / session-mode content, and the
+        memory system prompt actually reach the model in realtime (the matching tools are
+        advertised separately by :meth:`_resolve_session_tools`).
+
+        State-dependent pieces (session-mode skill from a state field, memory preload from the
+        latest user query) are therefore a connect-time snapshot, not re-evaluated per turn;
+        dynamic behaviour mid-session goes through ``set_skill`` / memory tools instead.
+
+        ``{field}`` placeholders in the prompt content are interpolated from ``state`` exactly
+        like the turn-based path (via :func:`convert_messages`), so a system prompt that reads
+        from state behaves identically here.
+        """
+        from agentflow.utils.converter import _interpolate_system_prompts
+
+        base = list(self.system_prompt)
+        if not base and rt.system_instruction:
+            base = [{"role": "system", "content": rt.system_instruction}]
+
+        prompts = self._build_skill_prompts(state, base)
+        prompts = prompts + await self._build_memory_prompts(state, config)
+        prompts = _interpolate_system_prompts(prompts, state)
+
+        instruction = "\n\n".join(
+            str(p["content"]) for p in prompts if p.get("content")
+        ).strip()
+        if not instruction:
+            return rt
+        return rt.model_copy(update={"system_instruction": instruction})
 
     async def _receive_until_stop(
         self, client: RealtimeClient, stop_event: asyncio.Event
@@ -307,6 +379,8 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                             await client.send_audio(item.data, item.sample_rate)
                         elif item.kind == "text" and item.text is not None:
                             await client.send_text(item.text)
+                        elif item.kind == "image" and item.data is not None:
+                            await client.send_image(item.data, item.mime_type or "image/jpeg")
                         elif item.kind == "activity_start":
                             await client.send_activity_start()
                         elif item.kind == "activity_end":
@@ -564,6 +638,38 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
             client = self._client_factory()
             await client.connect(rt, resume_handle=self._resume_handle)
             self._active_client = client
+
+    # ------------------------------------------------------------------ #
+    # Lifecycle hooks (session == graph run; turn == one model generation).
+    # ------------------------------------------------------------------ #
+    async def _fire_graph_start(
+        self, cb: CallbackManager, config: dict[str, Any], state: AgentState
+    ) -> AgentState:
+        if not cb._lifecycle_hooks:
+            return state
+        return await cb.fire_on_graph_start(GraphLifecycleContext(config=config), state)
+
+    async def _fire_graph_end(
+        self, cb: CallbackManager, config: dict[str, Any], state: AgentState, turns: int
+    ) -> None:
+        if not cb._lifecycle_hooks:
+            return
+        messages = list(getattr(state, "context", []) or [])
+        await cb.fire_on_graph_end(GraphLifecycleContext(config=config), state, messages, turns)
+
+    async def _fire_turn_start(
+        self, cb: CallbackManager, config: dict[str, Any], state: AgentState, turn_index: int
+    ) -> AgentState:
+        if not cb._lifecycle_hooks:
+            return state
+        return await cb.fire_on_turn_start(GraphLifecycleContext(config=config), state, turn_index)
+
+    async def _fire_turn_end(
+        self, cb: CallbackManager, config: dict[str, Any], state: AgentState, turn_index: int
+    ) -> AgentState:
+        if not cb._lifecycle_hooks:
+            return state
+        return await cb.fire_on_turn_end(GraphLifecycleContext(config=config), state, turn_index)
 
     # ------------------------------------------------------------------ #
     # Observability for events ToolNode doesn't already publish.

@@ -439,6 +439,19 @@ class TestGeminiLiveClientSend:
         assert session.sent_realtime[0]["text"] == "hello there"
 
     @pytest.mark.asyncio
+    async def test_send_image_maps_to_media_blob(self, config):
+        session = FakeLiveSession()
+        client = GeminiLiveClient(connector=FakeConnector(session))
+        await client.connect(config)
+
+        await client.send_image(b"\xff\xd8\xff", mime_type="image/jpeg")
+
+        assert len(session.sent_realtime) == 1
+        blob = session.sent_realtime[0]["media"]
+        assert blob.data == b"\xff\xd8\xff"
+        assert blob.mime_type == "image/jpeg"
+
+    @pytest.mark.asyncio
     async def test_send_before_connect_raises(self, config):
         client = GeminiLiveClient(connector=FakeConnector(FakeLiveSession()))
         with pytest.raises(RuntimeError):
