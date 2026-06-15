@@ -15,12 +15,13 @@ from agentflow.core.graph.state_graph import StateGraph
 from agentflow.core.graph.tool_node import ToolNode
 from agentflow.core.realtime.base import RealtimeClient, RealtimeConfig
 from agentflow.core.realtime.live_agent import LiveAgent
+from agentflow.core.skills.models import SkillConfig
 from agentflow.core.state.agent_state import AgentState
 from agentflow.core.state.base_context import BaseContextManager
 from agentflow.runtime.publisher.base_publisher import BasePublisher
 from agentflow.storage.checkpointer.base_checkpointer import BaseCheckpointer
-from agentflow.storage.media.storage.base import BaseMediaStore
 from agentflow.storage.store.base_store import BaseStore
+from agentflow.storage.store.memory_config import MemoryConfig
 from agentflow.utils.callbacks import CallbackManager
 from agentflow.utils.constants import END
 from agentflow.utils.id_generator import BaseIDGenerator, DefaultIDGenerator
@@ -43,8 +44,8 @@ class AudioAgent[StateT: AgentState]:
         tools: Iterable[Callable] | None = None,
         client: Any = None,
         pass_user_info_to_mcp: bool = False,
-        skills: Any | None = None,
-        memory: Any | None = None,
+        skills: SkillConfig | None = None,
+        memory: MemoryConfig | None = None,
         realtime_client_factory: Callable[[], RealtimeClient] | None = None,
         live_node_name: str = "LIVE",
         **agent_kwargs: Any,
@@ -76,7 +77,10 @@ class AudioAgent[StateT: AgentState]:
 
     @staticmethod
     def _build_tool_node(
-        *, tools: list[Callable], client: Any, pass_user_info_to_mcp: bool
+        *,
+        tools: list[Callable],
+        client: Any,
+        pass_user_info_to_mcp: bool,
     ) -> ToolNode | None:
         if not tools and client is None:
             return None
@@ -103,23 +107,22 @@ class AudioAgent[StateT: AgentState]:
         self,
         checkpointer: BaseCheckpointer[StateT] | None = None,
         store: BaseStore | None = None,
-        interrupt_before: list[str] | None = None,
-        interrupt_after: list[str] | None = None,
         callback_manager: CallbackManager | None = None,
-        media_store: BaseMediaStore | None = None,
         shutdown_timeout: float = 30.0,
     ) -> CompiledGraph:
+        # No media_store: realtime media (images/video) is sent frame-by-frame straight to
+        # the live model via the input queue (see LiveInputQueue.send_image); it is never
+        # offloaded to or resolved from a media store, so the parameter would be dead here.
         self._configure_graph()
+
         if self._graph is None:  # pragma: no cover - _configure_graph always assigns
             raise RuntimeError("graph configuration failed")
+
         return self._graph.compile(
             checkpointer=checkpointer,
             store=store,
-            interrupt_before=interrupt_before,
-            interrupt_after=interrupt_after,
             callback_manager=callback_manager
             if callback_manager is not None
             else CallbackManager(),
-            media_store=media_store,
             shutdown_timeout=shutdown_timeout,
         )

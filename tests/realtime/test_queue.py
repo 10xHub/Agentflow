@@ -24,6 +24,21 @@ class TestLiveInputQueuePut:
         assert item.kind == "text"
         assert item.text == "hello"
 
+    def test_send_image_enqueues_image_frame_with_mime(self):
+        q = LiveInputQueue()
+        q.send_image(b"\xff\xd8\xff")
+        item = q.get_nowait()
+        assert item.kind == "image"
+        assert item.data == b"\xff\xd8\xff"
+        assert item.mime_type == "image/jpeg"
+
+    def test_send_image_accepts_custom_mime(self):
+        q = LiveInputQueue()
+        q.send_image(b"\x89PNG", mime_type="image/png")
+        item = q.get_nowait()
+        assert item.kind == "image"
+        assert item.mime_type == "image/png"
+
     def test_activity_markers_enqueue_control_frames(self):
         q = LiveInputQueue()
         q.send_activity_start()

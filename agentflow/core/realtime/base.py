@@ -143,6 +143,20 @@ class VADConfig(BaseModel):
     silence_duration_ms: int | None = None
 
 
+class ReconnectConfig(BaseModel):
+    """Reconnect/backoff policy for a dropped realtime socket.
+
+    Provider-initiated ``go_away`` rotations always reconnect immediately (no backoff). Only
+    error-driven drops back off: attempt ``n`` waits ``min(base_delay * 2**(n-1), max_delay)``
+    seconds, up to ``max_attempts`` tries before the session ends with a fatal error. Set
+    ``max_attempts=0`` to disable error-driven reconnect entirely.
+    """
+
+    base_delay: float = Field(default=0.5, ge=0.0)
+    max_delay: float = Field(default=10.0, ge=0.0)
+    max_attempts: int = Field(default=5, ge=0)
+
+
 class RealtimeConfig(BaseModel):
     """Per-session configuration handed to a :class:`RealtimeClient`.
 
@@ -161,6 +175,7 @@ class RealtimeConfig(BaseModel):
     input_audio_transcription: bool = True
     output_audio_transcription: bool = True
     vad: VADConfig = Field(default_factory=VADConfig)
+    reconnect: ReconnectConfig = Field(default_factory=ReconnectConfig)
     context_window_compression: bool = False
     session_resumption: bool = True
     tools: list[Any] | None = None
@@ -198,6 +213,10 @@ class RealtimeClient(Protocol):
 
     async def send_text(self, text: str) -> None:
         """Send a text turn into the live session."""
+        ...
+
+    async def send_image(self, data: bytes, mime_type: str) -> None:
+        """Send a single image frame (still image or video frame) into the live session."""
         ...
 
     async def send_activity_start(self) -> None:

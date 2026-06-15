@@ -301,6 +301,11 @@ class GeminiLiveClient:
         session = self._require_session()
         await session.send_realtime_input(text=text)
 
+    async def send_image(self, data: bytes, mime_type: str = "image/jpeg") -> None:
+        session = self._require_session()
+        _, types = self._genai()
+        await session.send_realtime_input(media=types.Blob(data=data, mime_type=mime_type))
+
     async def send_activity_start(self) -> None:
         session = self._require_session()
         _, types = self._genai()
