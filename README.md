@@ -25,6 +25,7 @@
 - **🤖 Multi-Agent Workflows** - Build complex agent systems with your choice of orchestration patterns
 - **📊 Structured Responses** - Get `content`, optional `thinking`, and `usage` in a standardized format
 - **🌊 Streaming Support** - Real-time incremental responses with delta updates
+- **🎙️ Realtime Audio Agents** - Live audio-to-audio sessions over Gemini Live with barge-in, transcripts, tool calling, and automatic reconnect (`AudioAgent`)
 - **🔧 Tool Integration** - Native support for function calling and MCP tools with **parallel execution**
 - **🔀 LangGraph-Inspired Engine** - Flexible graph orchestration with nodes, conditional edges, and control flow
 - **💾 State Management** - Built-in persistence with in-memory and PostgreSQL+Redis checkpointers
@@ -163,6 +164,9 @@ pip install 10xscale-agentflow[google-genai]
 
 # OpenAI adapter (openai SDK)
 pip install 10xscale-agentflow[openai]
+
+# Realtime audio-to-audio agents (Gemini Live)
+pip install 10xscale-agentflow[realtime]
 
 # Vector / long-term memory stores
 pip install 10xscale-agentflow[qdrant]    # Qdrant store
@@ -676,6 +680,51 @@ python examples/react_stream/stream_react_agent.py
 
 ---
 
+## 🎙️ Example: Realtime Audio Agent
+
+Build a live, audio-to-audio agent over Gemini Live. The session is driven by a
+separate runtime (`arealtime`) because the provider owns the turn loop — you feed an
+input queue and consume normalized events (audio, transcripts, tool calls, barge-in).
+
+```python
+import asyncio
+from agentflow.prebuilt.agent import AudioAgent
+from agentflow.core.realtime import LiveInputQueue, RealtimeConfig
+
+def get_weather(city: str) -> str:
+    """Look up the weather for a city."""
+    return f"It's sunny in {city}."
+
+app = AudioAgent(
+    "gemini-live-2.5-flash-preview",
+    realtime_config=RealtimeConfig(model="gemini-live-2.5-flash-preview", voice="Puck"),
+    system_prompt=[{"role": "system", "content": "You are a concise voice assistant."}],
+    tools=[get_weather],   # advertised to the model; runs React-style (incl. barge-in)
+).compile()
+
+async def main():
+    queue = LiveInputQueue()
+    queue.send_audio(pcm16_bytes)   # non-blocking; safe from an audio callback
+    # queue.send_image(jpeg_bytes)  # optional: send a still image / video frame
+    async for event in app.arealtime(queue, {"thread_id": "t1"}):
+        ...                         # AudioDeltaEvent / transcripts / ToolCallEvent / ...
+    queue.close()                   # ends the session once the provider goes idle
+
+asyncio.run(main())
+```
+
+Install the extra and set your key:
+```bash
+pip install 10xscale-agentflow[realtime]
+export GEMINI_API_KEY=...
+```
+
+Highlights: barge-in, persisted transcripts (raw audio is never stored), automatic
+reconnect with session resumption, image/video frame input, and `system_prompt` /
+`skills` / `memory` working like a normal agent. See `examples/realtime/`.
+
+---
+
 ## ⚡ Parallel Tool Execution
 
 10xScale Agentflow automatically executes multiple tool calls **in parallel** when an LLM requests multiple tools simultaneously. This dramatically improves performance for I/O-bound operations.
@@ -712,6 +761,7 @@ See the [parallel tool execution documentation](https://10xhub.github.io/Agentfl
 - **RAG Agent** - Retrieval-augmented generation
 - **Guarded Agent** - Input/output validation and safety
 - **Plan-Act-Reflect** - Multi-step reasoning
+- **Audio Agent** - Realtime audio-to-audio sessions (Gemini Live) with barge-in and tool calling
 
 ### 🔀 Orchestration Patterns
 
@@ -790,6 +840,7 @@ See `pyproject.dev.toml` for complete tool configurations.
 - ✅ Prebuilt agent patterns
 - ✅ Agent-to-Agent (A2A) communication protocols
 - ✅ Observability and tracing (OpenTelemetry)
+- ✅ Realtime audio-to-audio agents (Gemini Live)
 - 🚧 Remote node execution for distributed processing
 - 🚧 More persistence backends (Redis, DynamoDB)
 - 🚧 Parallel/branching strategies

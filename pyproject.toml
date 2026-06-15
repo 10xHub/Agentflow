@@ -1,6 +1,6 @@
 [project]
 name = "10xscale-agentflow"
-version = "0.7.5.1"
+version = "0.8.0"
 description = "Production-grade Python framework for building, orchestrating, and deploying multi-agent LLM systems. A simpler, batteries-included alternative to LangGraph, CrewAI, and AutoGen with graph-based workflows, durable state, native MCP support, and provider-agnostic LLM integration (OpenAI, Google GenAI, Anthropic)."
 readme = "README.md"
 keywords = [
@@ -97,6 +97,7 @@ build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
 google-genai = ["google-genai>=1.56.0"]
+realtime = ["google-genai>=1.56.0"]
 openai = ["openai>=1.77.0"]
 pg_checkpoint = ["asyncpg>=0.29.0","redis>=4.2"]
 mcp = ["fastmcp>=2.11.3","mcp>=1.13.0"]
