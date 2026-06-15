@@ -22,7 +22,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentflow.core.graph.agent_internal.memory import AgentMemoryMixin
 from agentflow.core.graph.agent_internal.skills import AgentSkillsMixin
@@ -35,6 +35,7 @@ from agentflow.core.realtime.base import (
     OutputTranscriptEvent,
     RealtimeClient,
     RealtimeConfig,
+    ToolCallEvent,
     ToolResultEvent,
 )
 from agentflow.core.realtime.providers.gemini_live import GeminiLiveClient
@@ -174,9 +175,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         self._active_client = client
         # Only reseed when the provider did NOT restore context from a handle; otherwise the
         # model would receive the whole conversation twice (handle restore + reseed).
-        await self._maybe_reseed(
-            config, checkpointer, context_manager, resumed=handle is not None
-        )
+        await self._maybe_reseed(config, checkpointer, context_manager, resumed=handle is not None)
 
         # Closing the input queue ends the session: the pump sets this when it drains the
         # close sentinel, and the receive loop stops once the provider goes idle.
@@ -332,27 +331,25 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         checkpointer: BaseCheckpointer | None,
         callback_manager: CallbackManager,
     ) -> list[RealtimeEvent]:
-        kind = event.type
-
-        if kind == "tool_call":
+        if event.type == "tool_call":
             return await self._run_tool(event, config, state, callback_manager)
 
-        if kind == "input_transcript":
+        if event.type == "input_transcript":
             return await self._accumulate_transcript(event, "user", config, state, checkpointer)
-        if kind == "output_transcript":
+        if event.type == "output_transcript":
             return await self._accumulate_transcript(
                 event, "assistant", config, state, checkpointer
             )
 
-        if kind == "interrupted":
+        if event.type == "interrupted":
             # Barge-in discards the model's in-flight turn; drop any partial transcript so
             # the restarted turn isn't concatenated onto the abandoned one.
             self._input_transcript_buf = ""
             self._output_transcript_buf = ""
             self._publish_realtime(EventType.INTERRUPTED, config, ContentType.AUDIO, "barge_in")
-        elif kind == "go_away":
+        elif event.type == "go_away":
             self._publish_realtime(EventType.UPDATE, config, ContentType.UPDATE, "go_away")
-        elif kind == "session_update":
+        elif event.type == "session_update":
             self._resume_handle = event.resumption_handle
             await self._persist_handle(config, checkpointer)
             self._publish_realtime(EventType.UPDATE, config, ContentType.UPDATE, "session_resumed")
@@ -361,8 +358,8 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
 
     async def _accumulate_transcript(
         self,
-        event: RealtimeEvent,
-        role: str,
+        event: InputTranscriptEvent | OutputTranscriptEvent,
+        role: Literal["user", "assistant"],
         config: dict[str, Any],
         state: AgentState,
         checkpointer: BaseCheckpointer | None,
@@ -402,7 +399,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
 
     async def _run_tool(
         self,
-        event: RealtimeEvent,
+        event: ToolCallEvent,
         config: dict[str, Any],
         state: AgentState,
         callback_manager: CallbackManager,
@@ -447,7 +444,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
     async def _persist_transcript(
         self,
         text: str,
-        role: str,
+        role: Literal["user", "assistant"],
         config: dict[str, Any],
         state: AgentState,
         checkpointer: BaseCheckpointer | None,
@@ -519,7 +516,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                 history = trimmed.context
             except Exception:
                 logger.warning("context compression failed during reseed; using raw history")
-        if history:
+        if history and self._active_client is not None:
             await self._active_client.reseed_history(list(history))
 
     async def _attempt_reconnect(
@@ -552,9 +549,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                 fatal=True,
             )
 
-        delay = min(
-            self._reconnect_base_delay * (2 ** (attempts - 1)), self._reconnect_max_delay
-        )
+        delay = min(self._reconnect_base_delay * (2 ** (attempts - 1)), self._reconnect_max_delay)
         await asyncio.sleep(delay)
         with contextlib.suppress(Exception):
             await self._reconnect(rt)

@@ -128,6 +128,10 @@ RealtimeEvent = Annotated[
 ResponseModality = Literal["AUDIO", "TEXT"]
 
 
+def _default_modalities() -> list[ResponseModality]:
+    return ["AUDIO"]
+
+
 class VADConfig(BaseModel):
     """Voice-activity-detection settings. Disable for push-to-talk (manual activity)."""
 
@@ -151,7 +155,7 @@ class RealtimeConfig(BaseModel):
     model_config = ConfigDict(validate_default=True)
 
     model: str
-    response_modalities: list[ResponseModality] = Field(default_factory=lambda: ["AUDIO"])
+    response_modalities: list[ResponseModality] = Field(default_factory=_default_modalities)
     voice: str | None = None
     system_instruction: str | None = None
     input_audio_transcription: bool = True
