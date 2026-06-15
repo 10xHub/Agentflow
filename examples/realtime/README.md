@@ -31,14 +31,15 @@ python examples/realtime/audio_agent_file.py path/to/input.wav   # 16 kHz mono P
 # writes out.wav and prints transcripts + tool calls
 ```
 
-## 2. Live microphone (full duplex)
+## 2. Live microphone (full duplex, React-style tool calling)
 
-Speak and the agent talks back, with barge-in and tool calling.
+Speak and the agent talks back out loud, with barge-in. Ask about the weather and it
+calls the `get_weather` tool, then speaks the result (reason -> tool -> respond).
 
 ```bash
 pip install sounddevice
 python examples/realtime/audio_agent_mic.py
-# speak; Ctrl+C to stop
+# then say: "What's the weather in Tokyo?"   (Ctrl+C to stop)
 ```
 
 ## 3. Through the API server (`/v1/graph/live` WebSocket)

@@ -10,6 +10,7 @@ testable with lightweight stand-ins.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -44,6 +45,20 @@ def _rate_from_mime(mime_type: str | None, default: int) -> int:
     return int(match.group(1)) if match else default
 
 
+def _transcript_event(tx: Any, event_cls: Any) -> RealtimeEvent | None:
+    """Build a transcript event from a provider transcription, or None when there's nothing.
+
+    Emits on text OR finished so the finish marker (often text=None) is never dropped.
+    """
+    if tx is None:
+        return None
+    text = getattr(tx, "text", None)
+    finished = bool(getattr(tx, "finished", False))
+    if text is None and not finished:
+        return None
+    return event_cls(text=text or "", finished=finished)
+
+
 def normalize_message(message: Any) -> list[RealtimeEvent]:
     """Map a google ``LiveServerMessage`` to zero or more normalized events.
 
@@ -62,26 +77,27 @@ def normalize_message(message: Any) -> list[RealtimeEvent]:
                 rate = _rate_from_mime(getattr(inline, "mime_type", None), OUTPUT_SAMPLE_RATE)
                 events.append(AudioDeltaEvent(data=data, sample_rate=rate))
 
-        in_tx = getattr(content, "input_transcription", None)
-        if in_tx is not None and getattr(in_tx, "text", None) is not None:
-            events.append(
-                InputTranscriptEvent(
-                    text=in_tx.text, finished=bool(getattr(in_tx, "finished", False))
-                )
-            )
-
-        out_tx = getattr(content, "output_transcription", None)
-        if out_tx is not None and getattr(out_tx, "text", None) is not None:
-            events.append(
-                OutputTranscriptEvent(
-                    text=out_tx.text, finished=bool(getattr(out_tx, "finished", False))
-                )
-            )
+        # Transcripts stream as partial chunks; the terminating chunk often carries
+        # finished=True with text=None. Emit on text OR finished so the finish marker
+        # is never dropped (consumers accumulate partials and flush on finished).
+        in_ev = _transcript_event(
+            getattr(content, "input_transcription", None), InputTranscriptEvent
+        )
+        if in_ev is not None:
+            events.append(in_ev)
+        out_ev = _transcript_event(
+            getattr(content, "output_transcription", None), OutputTranscriptEvent
+        )
+        if out_ev is not None:
+            events.append(out_ev)
 
         if getattr(content, "interrupted", None):
             events.append(InterruptedEvent())
 
-        if getattr(content, "generation_complete", None) or getattr(content, "turn_complete", None):
+        # ``turn_complete`` is the single authoritative end-of-turn signal. ``generation_complete``
+        # arrives in a separate earlier message within the same turn; mapping both to
+        # TurnCompleteEvent would emit two per turn and double-count turn boundaries.
+        if getattr(content, "turn_complete", None):
             events.append(TurnCompleteEvent())
 
     tool_call = getattr(message, "tool_call", None)
@@ -121,11 +137,15 @@ class GeminiLiveClient:
         connector: Any | None = None,
         api_key: str | None = None,
         use_vertex_ai: bool = False,
+        project: str | None = None,
+        location: str | None = None,
     ) -> None:
         self._client = client
         self._connector = connector
         self._api_key = api_key
         self._use_vertex_ai = use_vertex_ai
+        self._project = project
+        self._location = location
         self._config: RealtimeConfig | None = None
         self._cm: Any | None = None
         self._session: Any | None = None
@@ -149,9 +169,48 @@ class GeminiLiveClient:
 
     def _ensure_client(self) -> Any:
         if self._client is None:
-            genai, _ = self._genai()
-            self._client = genai.Client(api_key=self._api_key, vertexai=self._use_vertex_ai)
+            self._client = self._build_client()
         return self._client
+
+    def _build_client(self) -> Any:
+        """Construct a google-genai client, supporting both auth modes (mirrors the
+        turn-based factory in ``agentflow.core.llm.client_factory``).
+
+        - Vertex AI / service account: ``use_vertex_ai=True`` with ``GOOGLE_CLOUD_PROJECT``
+          (and optional ``GOOGLE_CLOUD_LOCATION``); credentials come from Application
+          Default Credentials (e.g. a service-account key via ``GOOGLE_APPLICATION_CREDENTIALS``).
+        - Developer API key: explicit ``api_key`` or ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY``.
+
+        ``vertexai`` is always passed explicitly so the ``GOOGLE_GENAI_USE_VERTEXAI`` env var
+        can't silently flip the mode out from under the caller.
+        """
+        genai, _ = self._genai()
+
+        if self._use_vertex_ai:
+            project = self._project or os.getenv("GOOGLE_CLOUD_PROJECT")
+            location = self._location or os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+            if not project:
+                raise ValueError(
+                    "Vertex AI realtime requires a project: pass project=... or set "
+                    "GOOGLE_CLOUD_PROJECT (credentials via Application Default Credentials / "
+                    "GOOGLE_APPLICATION_CREDENTIALS)."
+                )
+            logger.info(
+                "Creating Gemini Live client (Vertex AI, project=%s, location=%s)",
+                project,
+                location,
+            )
+            return genai.Client(vertexai=True, project=project, location=location)
+
+        api_key = self._api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "Gemini realtime requires credentials: set GEMINI_API_KEY or GOOGLE_API_KEY "
+                "(or pass api_key=...), or use Vertex AI with use_vertex_ai=True and "
+                "GOOGLE_CLOUD_PROJECT."
+            )
+        logger.info("Creating Gemini Live client (API key)")
+        return genai.Client(vertexai=False, api_key=api_key)
 
     def _get_connector(self) -> Any:
         if self._connector is not None:
@@ -264,21 +323,37 @@ class GeminiLiveClient:
         _, types = self._genai()
         turns = []
         for message in messages:
+            # Gemini live turns are user/model only. System prompts are passed via
+            # system_instruction, and tool turns are not reseedable as dialogue, so skip
+            # both rather than mislabeling them as user input.
+            role = getattr(message, "role", "user")
+            if role not in ("user", "assistant"):
+                continue
             text = "".join(
                 getattr(block, "text", "") or "" for block in getattr(message, "content", []) or []
             )
             if not text:
                 continue
-            role = "model" if getattr(message, "role", "user") == "assistant" else "user"
-            turns.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+            gem_role = "model" if role == "assistant" else "user"
+            turns.append(types.Content(role=gem_role, parts=[types.Part.from_text(text=text)]))
         if turns:
             await session.send_client_content(turns=turns, turn_complete=True)
 
     async def receive(self) -> AsyncIterator[RealtimeEvent]:
-        session = self._require_session()
-        async for message in session.receive():
-            for event in normalize_message(message):
-                yield event
+        # Gemini Live's session.receive() completes after each turn_complete; you must call
+        # it again for the next turn. Loop so a session spans multiple turns. A receive()
+        # that yields no messages means the connection is going away, so stop (and a dropped
+        # socket raises out of receive(), which the caller treats as a transient drop).
+        self._require_session()
+        while self._session is not None:
+            session = self._session
+            produced = False
+            async for message in session.receive():
+                produced = True
+                for event in normalize_message(message):
+                    yield event
+            if not produced:
+                break
 
     async def close(self) -> None:
         cm = self._cm

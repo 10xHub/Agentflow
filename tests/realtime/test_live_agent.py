@@ -255,6 +255,132 @@ class TestTranscriptPersistence:
         assert {m.content[0].text for m in persisted} == {"hello", "hi there"}
 
 
+class TestTranscriptAccumulation:
+    @pytest.mark.asyncio
+    async def test_partial_chunks_accumulate_and_flush_on_finished(self):
+        from agentflow.storage.checkpointer import InMemoryCheckpointer
+
+        # Streamed as partials (finished=False) then a finish marker with empty text.
+        client = FakeRealtimeClient(
+            [
+                OutputTranscriptEvent(text="Hello ", finished=False),
+                OutputTranscriptEvent(text="there ", finished=False),
+                OutputTranscriptEvent(text="friend.", finished=False),
+                OutputTranscriptEvent(text="", finished=True),
+            ]
+        )
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+        cp = InMemoryCheckpointer()
+        state = AgentState()
+        config = {"thread_id": "t-acc", "user_id": "u1"}
+
+        await _drain(agent, _closed_queue(), config, state=state, checkpointer=cp)
+
+        persisted = await cp.alist_messages(config)
+        assert [m.content[0].text for m in persisted] == ["Hello there friend."]
+
+    @pytest.mark.asyncio
+    async def test_finished_event_carries_full_text_to_consumer(self):
+        # The consumer should get one consolidated finished transcript with the whole text
+        # (not the empty finish marker), without having to accumulate partials itself.
+        client = FakeRealtimeClient(
+            [
+                OutputTranscriptEvent(text="Hello ", finished=False),
+                OutputTranscriptEvent(text="world", finished=False),
+                OutputTranscriptEvent(text="", finished=True),
+            ]
+        )
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        events = await _drain(agent, _closed_queue(), {"thread_id": "t-consolidate"})
+
+        finished = [
+            e for e in events if e.type == "output_transcript" and e.finished
+        ]
+        assert len(finished) == 1
+        assert finished[0].text == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_interruption_discards_partial_so_restart_is_not_concatenated(self):
+        # A barge-in mid-transcript must drop the abandoned partial; the restarted turn's
+        # text must not be glued onto it.
+        client = FakeRealtimeClient(
+            [
+                OutputTranscriptEvent(text="The weather is ", finished=False),
+                InterruptedEvent(),
+                OutputTranscriptEvent(text="It is sunny.", finished=False),
+                OutputTranscriptEvent(text="", finished=True),
+            ]
+        )
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        events = await _drain(agent, _closed_queue(), {"thread_id": "t-barge"})
+
+        finished = [e for e in events if e.type == "output_transcript" and e.finished]
+        assert len(finished) == 1
+        assert finished[0].text == "It is sunny."
+
+    @pytest.mark.asyncio
+    async def test_empty_transcript_turn_emits_no_finished_event(self):
+        # A finished marker with nothing accumulated must not surface an empty transcript.
+        client = FakeRealtimeClient([OutputTranscriptEvent(text="", finished=True)])
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        events = await _drain(agent, _closed_queue(), {"thread_id": "t-empty"})
+
+        assert not any(e.type == "output_transcript" for e in events)
+
+
+class TestReseedGating:
+    @pytest.mark.asyncio
+    async def test_reseed_skipped_when_resumed_from_handle(self):
+        from agentflow.storage.checkpointer import InMemoryCheckpointer
+        from agentflow.utils.thread_info import ThreadInfo
+
+        cp = InMemoryCheckpointer()
+        config = {"thread_id": "t-resumed", "user_id": "u1"}
+        await cp.aput_messages(config, [Message.text_message("earlier", role="user")])
+        # A stored handle means the provider restores context on connect; reseed must NOT
+        # replay history again.
+        await cp.aput_thread(
+            config, ThreadInfo(thread_id="t-resumed", metadata={"resumption_handle": "H1"})
+        )
+
+        client = FakeRealtimeClient([TurnCompleteEvent()])
+        agent = LiveAgent(MODEL, realtime_client_factory=_factory(client))
+
+        await _drain(agent, _closed_queue(), config, checkpointer=cp)
+
+        assert client.connected_with == ["H1"]
+        assert client.reseeded is None
+
+
+class TestReconnectBackoff:
+    @pytest.mark.asyncio
+    async def test_error_driven_reconnect_gives_up_and_emits_fatal_error(self):
+        # Every socket drops on receive: error-driven reconnect must back off, cap, then
+        # surface a fatal ErrorEvent rather than spin forever.
+        class DroppingClient(FakeRealtimeClient):
+            async def receive(self):
+                raise ConnectionError("socket dropped")
+                yield  # pragma: no cover - makes this an async generator
+
+        def make():
+            return DroppingClient()
+
+        agent = LiveAgent(MODEL, realtime_client_factory=make)
+        agent._reconnect_base_delay = 0.0  # no real sleeping in the test
+        agent._reconnect_max_attempts = 3
+        q = LiveInputQueue()  # left open so the loop is allowed to attempt resume
+
+        events = await _drain(agent, q, {"thread_id": "t-storm"})
+
+        fatal = [e for e in events if e.type == "error"]
+        assert len(fatal) == 1
+        assert fatal[0].fatal is True
+        assert fatal[0].code == "reconnect_failed"
+
+
 class TestSessionConfig:
     @pytest.mark.asyncio
     async def test_per_session_overrides_merge_over_realtime_config(self):

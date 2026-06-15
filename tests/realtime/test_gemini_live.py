@@ -82,11 +82,40 @@ class TestNormalizeMessage:
             for e in events
         )
 
-    def test_interrupted_and_generation_complete(self):
-        content = _server_content(interrupted=True, generation_complete=True)
+    def test_interrupted_emitted(self):
+        content = _server_content(interrupted=True)
         events = normalize_message(_msg(server_content=content))
         assert any(isinstance(e, InterruptedEvent) for e in events)
+
+    def test_turn_complete_emits_turn_complete_event(self):
+        content = _server_content(turn_complete=True)
+        events = normalize_message(_msg(server_content=content))
         assert any(isinstance(e, TurnCompleteEvent) for e in events)
+
+    def test_generation_complete_alone_is_not_a_turn_complete(self):
+        # generation_complete and turn_complete arrive in separate messages within one turn;
+        # only turn_complete is the authoritative end-of-turn signal. Mapping both would
+        # double-count turn boundaries.
+        content = _server_content(generation_complete=True)
+        events = normalize_message(_msg(server_content=content))
+        assert not any(isinstance(e, TurnCompleteEvent) for e in events)
+
+    def test_finished_transcript_with_no_text_still_emits_finish_marker(self):
+        # Gemini sends the terminating transcript chunk as finished=True, text=None.
+        # It must still surface so consumers can flush their accumulated transcript.
+        content = _server_content(
+            input_transcription=SimpleNamespace(text=None, finished=True),
+            output_transcription=SimpleNamespace(text=None, finished=True),
+        )
+        events = normalize_message(_msg(server_content=content))
+        assert any(
+            isinstance(e, InputTranscriptEvent) and e.text == "" and e.finished is True
+            for e in events
+        )
+        assert any(
+            isinstance(e, OutputTranscriptEvent) and e.text == "" and e.finished is True
+            for e in events
+        )
 
     def test_tool_call_function_calls(self):
         fc = SimpleNamespace(id="call-1", name="get_weather", args={"city": "Paris"})
@@ -141,7 +170,10 @@ class FakeLiveSession:
         self.client_content = kwargs
 
     async def receive(self):
-        for m in self.scripted:
+        # Mirror the real SDK: receive() drains one turn's messages then completes; a
+        # subsequent call returns nothing (the client loops receive() across turns).
+        batch, self.scripted = self.scripted, []
+        for m in batch:
             yield m
 
 
@@ -212,6 +244,26 @@ class TestGeminiLiveClientLifecycle:
         assert session.client_content["turn_complete"] is True
 
     @pytest.mark.asyncio
+    async def test_reseed_skips_system_and_tool_roles(self, config):
+        from agentflow.core.state import Message
+
+        session = FakeLiveSession()
+        client = GeminiLiveClient(connector=FakeConnector(session))
+        await client.connect(config)
+
+        await client.reseed_history(
+            [
+                Message.text_message("be nice", role="system"),
+                Message.text_message("hi", role="user"),
+                Message.text_message("hello", role="assistant"),
+            ]
+        )
+
+        turns = session.client_content["turns"]
+        # system turn is dropped (set via system_instruction, not reseeded as dialogue)
+        assert [t.role for t in turns] == ["user", "model"]
+
+    @pytest.mark.asyncio
     async def test_close_exits_context_manager_and_is_idempotent(self, config):
         session = FakeLiveSession()
         connector = FakeConnector(session)
@@ -223,6 +275,37 @@ class TestGeminiLiveClientLifecycle:
 
         assert connector.exited is True
         assert client.connected is False
+
+
+class TestClientCredentialResolution:
+    def test_api_key_from_env_is_used(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "k-123")
+        client = GeminiLiveClient()._build_client()
+        assert client is not None  # genai.Client built without raising
+
+    def test_explicit_api_key_overrides_env(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        client = GeminiLiveClient(api_key="explicit")._build_client()
+        assert client is not None
+
+    def test_missing_credentials_raises_clear_error(self, monkeypatch):
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="GEMINI_API_KEY or GOOGLE_API_KEY"):
+            GeminiLiveClient()._build_client()
+
+    def test_vertex_without_project_raises(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+        with pytest.raises(ValueError, match="project"):
+            GeminiLiveClient(use_vertex_ai=True)._build_client()
+
+    def test_vertex_uses_project_and_location(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "proj-x")
+        monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "europe-west1")
+        client = GeminiLiveClient(use_vertex_ai=True)._build_client()
+        assert client is not None
 
 
 class TestBuildConnectConfig:
@@ -388,3 +471,40 @@ class TestGeminiLiveClientReceive:
         with pytest.raises(RuntimeError):
             async for _ in client.receive():
                 pass
+
+    @pytest.mark.asyncio
+    async def test_receive_spans_multiple_turns(self, config):
+        # Gemini's session.receive() completes per turn; the client must loop it so a
+        # single receive() call streams events across several turns until the socket idles.
+        class MultiTurnSession:
+            def __init__(self, batches):
+                self.batches = list(batches)
+
+            async def send_realtime_input(self, **kw):
+                pass
+
+            async def receive(self):
+                if self.batches:
+                    for m in self.batches.pop(0):
+                        yield m
+                # exhausted -> yields nothing -> client loop stops
+
+            async def __aenter__(self):
+                return self
+
+        turn1 = [
+            _msg(server_content=_server_content(model_turn=SimpleNamespace(parts=[_audio_part(b"\x01")]))),
+            _msg(server_content=_server_content(turn_complete=True)),
+        ]
+        turn2 = [
+            _msg(server_content=_server_content(model_turn=SimpleNamespace(parts=[_audio_part(b"\x02")]))),
+            _msg(server_content=_server_content(turn_complete=True)),
+        ]
+        session = MultiTurnSession([turn1, turn2])
+        client = GeminiLiveClient(connector=FakeConnector(session))
+        await client.connect(config)
+
+        kinds = [e.type async for e in client.receive()]
+
+        # both turns streamed from one receive() call, then it stops cleanly
+        assert kinds == ["audio_delta", "turn_complete", "audio_delta", "turn_complete"]

@@ -22,14 +22,17 @@ import os
 import sys
 import wave
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from agentflow.core.realtime.base import OUTPUT_SAMPLE_RATE, RealtimeConfig
 from agentflow.core.realtime.queue import LiveInputQueue
 from agentflow.prebuilt.agent import AudioAgent
 
 
-load_dotenv()
+# Load .env reliably regardless of the launch directory.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_HERE, ".env"))
+load_dotenv(find_dotenv(usecwd=True))
 
 MODEL = os.getenv("GEMINI_LIVE_MODEL", "gemini-live-2.5-flash-preview")
 

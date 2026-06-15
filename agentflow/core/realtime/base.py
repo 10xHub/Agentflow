@@ -8,7 +8,7 @@ into the :data:`RealtimeEvent` union defined below.
 
 from typing import Annotated, Any, Literal, Protocol, Union, runtime_checkable
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # Audio format facts for Gemini Live: input PCM16 mono @ 16kHz, output PCM16 @ 24kHz.
@@ -145,6 +145,10 @@ class RealtimeConfig(BaseModel):
     Gemini Live permits exactly one response modality per session; ``response_modalities``
     is validated to a single entry.
     """
+
+    # validate_default so the default modality list is held to the same one-modality rule
+    # as explicit values (otherwise a bad default silently bypasses the validator below).
+    model_config = ConfigDict(validate_default=True)
 
     model: str
     response_modalities: list[ResponseModality] = Field(default_factory=lambda: ["AUDIO"])

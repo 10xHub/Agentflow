@@ -29,7 +29,14 @@ from agentflow.core.graph.agent_internal.skills import AgentSkillsMixin
 from agentflow.core.graph.base_agent import BaseAgent
 from agentflow.core.graph.tool_node import ToolNode
 from agentflow.core.llm import detect_provider
-from agentflow.core.realtime.base import RealtimeClient, RealtimeConfig, ToolResultEvent
+from agentflow.core.realtime.base import (
+    ErrorEvent,
+    InputTranscriptEvent,
+    OutputTranscriptEvent,
+    RealtimeClient,
+    RealtimeConfig,
+    ToolResultEvent,
+)
 from agentflow.core.realtime.providers.gemini_live import GeminiLiveClient
 from agentflow.core.state import AgentState, Message, TextBlock, add_messages
 from agentflow.runtime.publisher.events import ContentType, Event, EventModel, EventType
@@ -63,6 +70,8 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
     ) -> None:
         api_key: str | None = kwargs.pop("api_key", None)
         use_vertex_ai: bool = kwargs.pop("use_vertex_ai", False)
+        project: str | None = kwargs.pop("project", None)
+        location: str | None = kwargs.pop("location", None)
 
         provider = detect_provider(model, use_vertex_ai)
         if provider != "google":
@@ -89,13 +98,29 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         # One client per *connection*; the factory lets reconnects get a fresh socket
         # and lets tests inject a fake provider.
         self._client_factory: Callable[[], RealtimeClient] = realtime_client_factory or (
-            lambda: GeminiLiveClient(api_key=api_key, use_vertex_ai=use_vertex_ai)
+            lambda: GeminiLiveClient(
+                api_key=api_key,
+                use_vertex_ai=use_vertex_ai,
+                project=project,
+                location=location,
+            )
         )
         self._active_client: RealtimeClient | None = None
         self._resume_handle: str | None = None
         # Serializes upstream sends against reconnect (close+connect) so the pump never
         # sends on a socket being torn down, and always picks up the reconnected client.
         self._send_lock = asyncio.Lock()
+
+        # Per-session transcript accumulators (provider streams partial chunks; we flush
+        # the concatenation on the finished marker). Reset at the start of each arun().
+        self._input_transcript_buf = ""
+        self._output_transcript_buf = ""
+
+        # Error-driven reconnect backoff (go_away reconnects are immediate; only transient
+        # drops back off). Instance attributes so tests can shrink them.
+        self._reconnect_base_delay = 0.5
+        self._reconnect_max_delay = 10.0
+        self._reconnect_max_attempts = 5
 
         # Builder mixins (no-op when their config is None).
         self._setup_memory(memory)
@@ -138,6 +163,8 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         state = state if state is not None else AgentState()
         if callback_manager is None:
             callback_manager = CallbackManager()
+        self._input_transcript_buf = ""
+        self._output_transcript_buf = ""
         rt = self._session_realtime_config(config)
         rt = await self._resolve_session_tools(rt)
 
@@ -145,18 +172,25 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         client = self._client_factory()
         await client.connect(rt, resume_handle=handle)
         self._active_client = client
-        await self._maybe_reseed(config, checkpointer, context_manager)
+        # Only reseed when the provider did NOT restore context from a handle; otherwise the
+        # model would receive the whole conversation twice (handle restore + reseed).
+        await self._maybe_reseed(
+            config, checkpointer, context_manager, resumed=handle is not None
+        )
 
         # Closing the input queue ends the session: the pump sets this when it drains the
         # close sentinel, and the receive loop stops once the provider goes idle.
         stop_event = asyncio.Event()
         pump_task = asyncio.create_task(self._pump(input_queue, stop_event))
+        attempts = 0  # consecutive error-driven reconnect attempts (reset on healthy receive)
         try:
             while True:
                 reconnect = False
                 forced = False  # go_away: reconnect even after input closed, to finish the turn
+                received_any = False
                 try:
                     async for event in self._receive_until_stop(self._active_client, stop_event):
+                        received_any = True
                         for out in await self._handle_event(
                             event, config, state, checkpointer, callback_manager
                         ):
@@ -173,10 +207,18 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                     logger.warning("realtime receive loop error; attempting resume", exc_info=True)
                     reconnect = True
 
-                if reconnect and rt.session_resumption and (forced or not stop_event.is_set()):
-                    await self._reconnect(rt)
-                    continue
-                break
+                # A turn that produced events means the connection is healthy again.
+                if received_any:
+                    attempts = 0
+
+                resumable = reconnect and rt.session_resumption
+                if not (resumable and (forced or not stop_event.is_set())):
+                    break
+
+                attempts, fatal = await self._attempt_reconnect(rt, forced, attempts)
+                if fatal is not None:
+                    yield fatal
+                    break
         finally:
             pump_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -295,17 +337,18 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         if kind == "tool_call":
             return await self._run_tool(event, config, state, callback_manager)
 
-        if kind == "input_transcript" and event.finished:
-            await self._persist_transcript(event.text, "user", config, state, checkpointer)
-            self._publish_realtime(
-                EventType.RESULT, config, ContentType.TRANSCRIPT, "input_transcript"
+        if kind == "input_transcript":
+            return await self._accumulate_transcript(event, "user", config, state, checkpointer)
+        if kind == "output_transcript":
+            return await self._accumulate_transcript(
+                event, "assistant", config, state, checkpointer
             )
-        elif kind == "output_transcript" and event.finished:
-            await self._persist_transcript(event.text, "assistant", config, state, checkpointer)
-            self._publish_realtime(
-                EventType.RESULT, config, ContentType.TRANSCRIPT, "output_transcript"
-            )
-        elif kind == "interrupted":
+
+        if kind == "interrupted":
+            # Barge-in discards the model's in-flight turn; drop any partial transcript so
+            # the restarted turn isn't concatenated onto the abandoned one.
+            self._input_transcript_buf = ""
+            self._output_transcript_buf = ""
             self._publish_realtime(EventType.INTERRUPTED, config, ContentType.AUDIO, "barge_in")
         elif kind == "go_away":
             self._publish_realtime(EventType.UPDATE, config, ContentType.UPDATE, "go_away")
@@ -315,6 +358,47 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
             self._publish_realtime(EventType.UPDATE, config, ContentType.UPDATE, "session_resumed")
 
         return [event]
+
+    async def _accumulate_transcript(
+        self,
+        event: RealtimeEvent,
+        role: str,
+        config: dict[str, Any],
+        state: AgentState,
+        checkpointer: BaseCheckpointer | None,
+    ) -> list[RealtimeEvent]:
+        """Accumulate streamed transcript chunks and consolidate on the finished marker.
+
+        Providers stream transcripts as partial chunks (``finished=False``) and end with a
+        finished marker that usually carries no text. Partials pass through unchanged for live
+        display; on ``finished`` we persist the full turn and emit a single consolidated
+        event carrying the complete text (so consumers get the whole transcript without
+        having to accumulate themselves). Turns with no transcribed text emit nothing.
+        """
+        is_user = role == "user"
+        if is_user:
+            self._input_transcript_buf += event.text
+            buffered = self._input_transcript_buf
+        else:
+            self._output_transcript_buf += event.text
+            buffered = self._output_transcript_buf
+
+        if not event.finished:
+            return [event]  # stream the partial for live UIs
+
+        full = buffered.strip()
+        if is_user:
+            self._input_transcript_buf = ""
+        else:
+            self._output_transcript_buf = ""
+        if not full:
+            return []  # nothing transcribed this turn; drop the empty finish marker
+
+        await self._persist_transcript(full, role, config, state, checkpointer)
+        lifecycle = "input_transcript" if is_user else "output_transcript"
+        self._publish_realtime(EventType.RESULT, config, ContentType.TRANSCRIPT, lifecycle)
+        event_cls = InputTranscriptEvent if is_user else OutputTranscriptEvent
+        return [event_cls(text=full, finished=True)]
 
     async def _run_tool(
         self,
@@ -337,8 +421,13 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
             )
             result = self._extract_tool_result(invoked)
 
-        # Socket stays open; feed the result back to the model.
-        await self._active_client.send_tool_response(event.id, event.name, result)
+        # Socket stays open; feed the result back to the model. Hold _send_lock (and re-read
+        # the live client inside it) so this send is serialized against the pump and any
+        # concurrent reconnect, exactly like the pump's own sends.
+        async with self._send_lock:
+            client = self._active_client
+            if client is not None:
+                await client.send_tool_response(event.id, event.name, result)
         return [event, ToolResultEvent(id=event.id, result=result)]
 
     @staticmethod
@@ -411,8 +500,12 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         config: dict[str, Any],
         checkpointer: BaseCheckpointer | None,
         context_manager: BaseContextManager | None,
+        *,
+        resumed: bool = False,
     ) -> None:
-        if checkpointer is None:
+        # When the provider restored context from a resumption handle, reseeding would
+        # replay the whole conversation a second time.
+        if checkpointer is None or resumed:
             return
         try:
             history = await checkpointer.alist_messages(config)
@@ -428,6 +521,44 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
                 logger.warning("context compression failed during reseed; using raw history")
         if history:
             await self._active_client.reseed_history(list(history))
+
+    async def _attempt_reconnect(
+        self, rt: RealtimeConfig, forced: bool, attempts: int
+    ) -> tuple[int, ErrorEvent | None]:
+        """Reconnect after a drop. Returns ``(attempts, fatal_error_or_None)``.
+
+        ``forced`` (go_away) is an expected provider rotation: reconnect promptly, no backoff.
+        Error-driven drops back off exponentially with a hard attempt cap so a flapping or
+        down provider can't spin a tight reconnect storm; once the cap is hit a fatal
+        :class:`ErrorEvent` is returned for the caller to surface before ending the session.
+        """
+        if forced:
+            with contextlib.suppress(Exception):
+                await self._reconnect(rt)
+            return 0, None
+
+        attempts += 1
+        if attempts > self._reconnect_max_attempts:
+            logger.error(
+                "realtime reconnect attempts exhausted (%d); giving up",
+                self._reconnect_max_attempts,
+            )
+            return attempts, ErrorEvent(
+                code="reconnect_failed",
+                message=(
+                    "realtime session lost and could not be resumed after "
+                    f"{self._reconnect_max_attempts} attempts"
+                ),
+                fatal=True,
+            )
+
+        delay = min(
+            self._reconnect_base_delay * (2 ** (attempts - 1)), self._reconnect_max_delay
+        )
+        await asyncio.sleep(delay)
+        with contextlib.suppress(Exception):
+            await self._reconnect(rt)
+        return attempts, None
 
     async def _reconnect(self, rt: RealtimeConfig) -> None:
         async with self._send_lock:
