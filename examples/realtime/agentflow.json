@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "./graph.py:app",
+    "checkpointer": "./graph.py:checkpointer"
+  },
+  "env": ".env"
+}

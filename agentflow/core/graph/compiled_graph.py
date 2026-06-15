@@ -20,6 +20,7 @@ from agentflow.runtime.publisher.base_publisher import BasePublisher
 from agentflow.storage.checkpointer.base_checkpointer import BaseCheckpointer
 from agentflow.storage.store.base_store import BaseStore
 from agentflow.utils import (
+    CallbackManager,
     ResponseGranularity,
 )
 from agentflow.utils.background_task_manager import BackgroundTaskManager
@@ -275,6 +276,7 @@ class CompiledGraph[StateT: AgentState]:
         Returns:
             Response dict based on granularity
         """
+        self._guard_not_realtime()
         cfg = self._prepare_config(config, is_stream=False)
 
         return await self._invoke_handler.invoke(
@@ -465,7 +467,7 @@ class CompiledGraph[StateT: AgentState]:
         Yields:
             Message objects with incremental content
         """
-
+        self._guard_not_realtime()
         cfg = self._prepare_config(config, is_stream=True)
 
         async for chunk in self._stream_handler.stream(
@@ -526,6 +528,102 @@ class CompiledGraph[StateT: AgentState]:
             len(tools),
             node_name,
         )
+
+    # ------------------------------------------------------------------ #
+    # Realtime runtime (audio-to-audio). A separate runtime from the
+    # super-step invoke/stream loop: the live agent owns the turn loop.
+    # ------------------------------------------------------------------ #
+    def _find_live_nodes(self) -> list[tuple[str, Node]]:
+        from agentflow.core.realtime.live_agent import LiveAgent
+
+        return [
+            (name, node)
+            for name, node in self._state_graph.nodes.items()
+            if isinstance(node.func, LiveAgent)
+        ]
+
+    def _guard_not_realtime(self) -> None:
+        """Forcing rule: a graph containing a LiveAgent must use arealtime()."""
+        if self._find_live_nodes():
+            raise RuntimeError(
+                "This graph contains a LiveAgent; use .arealtime() / .realtime() instead of "
+                "invoke/ainvoke/stream/astream."
+            )
+
+    async def arealtime(
+        self,
+        input_queue: Any,
+        config: dict[str, Any] | None = None,
+        state: AgentState | None = None,
+    ) -> AsyncIterator[Any]:
+        """Run the graph's realtime (audio) session, yielding normalized RealtimeEvents.
+
+        Forcing rule: the graph must contain exactly one LiveAgent (the root controller);
+        ordinary turn-based graphs must use invoke/stream.
+        """
+        live = self._find_live_nodes()
+        if not live:
+            raise RuntimeError(
+                "arealtime() requires a graph rooted at a LiveAgent (e.g. AudioAgent); "
+                "this graph has none. Use invoke/stream for turn-based graphs."
+            )
+        if len(live) > 1:
+            raise RuntimeError(
+                "Only one LiveAgent is allowed per realtime run in v1 "
+                f"(found {len(live)}: {[name for name, _ in live]})."
+            )
+
+        name, node = live[0]
+        agent = node.func
+        agent._node_name = name
+        cfg = self._prepare_config(config, is_stream=True)
+        callback_manager = InjectQ.get_instance().try_get(CallbackManager)
+        context_manager = self._state_graph._context_manager
+        run_state = state if state is not None else (self._state or AgentState())
+
+        async for event in agent.arun(
+            input_queue,
+            cfg,
+            run_state,
+            checkpointer=self._checkpointer,
+            callback_manager=callback_manager,
+            context_manager=context_manager,
+        ):
+            yield event
+
+    def realtime(
+        self,
+        input_queue: Any,
+        config: dict[str, Any] | None = None,
+        state: AgentState | None = None,
+    ) -> Generator[Any]:
+        """Synchronous wrapper over :meth:`arealtime` for non-async consumers.
+
+        Must be called from a thread with no running event loop; from inside an async
+        context (FastAPI handler, Jupyter), use :meth:`arealtime` directly.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # no running loop: safe to drive a private one below
+        else:
+            raise RuntimeError(
+                "realtime() (sync) cannot be called from a running event loop; "
+                "await arealtime() instead."
+            )
+
+        agen = self.arealtime(input_queue, config, state)
+        loop = asyncio.new_event_loop()
+        try:
+            while True:
+                try:
+                    yield loop.run_until_complete(agen.__anext__())
+                except StopAsyncIteration:
+                    break
+        finally:
+            with contextlib.suppress(Exception):
+                loop.run_until_complete(agen.aclose())
+            loop.close()
 
     async def aclose(self) -> dict[str, Any]:  # noqa: PLR0915
         """
