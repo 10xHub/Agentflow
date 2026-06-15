@@ -323,9 +323,7 @@ class LiveAgent(AgentSkillsMixin, AgentMemoryMixin, BaseAgent):
         prompts = prompts + await self._build_memory_prompts(state, config)
         prompts = _interpolate_system_prompts(prompts, state)
 
-        instruction = "\n\n".join(
-            str(p["content"]) for p in prompts if p.get("content")
-        ).strip()
+        instruction = "\n\n".join(str(p["content"]) for p in prompts if p.get("content")).strip()
         if not instruction:
             return rt
         return rt.model_copy(update={"system_instruction": instruction})
