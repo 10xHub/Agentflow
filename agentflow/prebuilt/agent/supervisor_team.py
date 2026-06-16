@@ -67,11 +67,13 @@ from agentflow.core.graph.compiled_graph import CompiledGraph
 from agentflow.core.graph.state_graph import StateGraph
 from agentflow.core.state.agent_state import AgentState
 from agentflow.core.state.base_context import BaseContextManager
+from agentflow.core.state.message import Message
 from agentflow.runtime.publisher.base_publisher import BasePublisher
 from agentflow.storage.checkpointer.base_checkpointer import BaseCheckpointer
 from agentflow.storage.media.storage.base import BaseMediaStore
 from agentflow.storage.store.base_store import BaseStore
 from agentflow.utils.callbacks import CallbackManager
+from agentflow.utils.command import Command
 from agentflow.utils.constants import END
 from agentflow.utils.id_generator import BaseIDGenerator, DefaultIDGenerator
 
@@ -80,8 +82,9 @@ logger = logging.getLogger("agentflow.prebuilt.supervisor_team")
 
 StateT = TypeVar("StateT", bound=AgentState)
 
-# Key stored in execution_meta.internal_data
+# Keys stored in execution_meta.internal_data
 _ROUNDS_KEY = "sta_rounds"
+_ROUTE_HISTORY_KEY = "sta_route_history"
 
 _FINISH_TOKEN = "FINISH"  # nosec: B105  # noqa: S105
 _SUPERVISOR_NODE = "SUPERVISOR"
@@ -191,54 +194,90 @@ def _make_worker_route(tool_node_name: str) -> Callable[[AgentState], str]:
     return _route
 
 
-def _make_supervisor_route(
+def _resolve_decision(raw: str, worker_names: list[str], rounds: int) -> str:
+    """Map a supervisor's raw response text to a worker name or ``END``.
+
+    1. ``FINISH`` token → ``END``.
+    2. First worker name matched with word boundaries → that worker (avoids
+       e.g. worker ``CODE`` matching ``DECODE``).
+    3. Nothing recognisable → ``END``.
+    """
+    if _FINISH_TOKEN in raw:
+        logger.debug("Supervisor signalled FINISH after %d round(s).", rounds)
+        return END
+
+    for name in worker_names:
+        if re.search(rf"\b{re.escape(name.upper())}\b", raw):
+            logger.debug("Supervisor routing to %s (round %d).", name, rounds)
+            return name
+
+    logger.warning("Supervisor response %r does not match any worker; terminating.", raw)
+    return END
+
+
+def _make_supervisor_node(
+    supervisor_agent: Agent,
     worker_names: list[str],
     max_rounds: int,
-) -> Callable[[AgentState], str]:
-    """Return a routing function for the SUPERVISOR node.
+) -> Callable[[AgentState, dict[str, Any]], Any]:
+    """Return the SUPERVISOR node.
+
+    Rather than emitting its routing token as a normal assistant message (which
+    would surface ``SCOUT`` / ``FINISH`` noise in the conversation and pollute
+    the context seen by workers), this node runs the supervisor agent
+    *internally*, reads its one-word decision, and returns a
+    :class:`~agentflow.utils.command.Command` whose ``goto`` drives navigation.
+    Because the ``Command`` carries no ``update``, nothing is streamed to the
+    caller and nothing is persisted to ``state.context``.
 
     Decision order:
 
     1. Hard-cap check: if ``max_rounds`` reached → ``END``.
-    2. Extract the supervisor's last text response.
-    3. If it matches a known worker name → route there.
-    4. If it contains ``FINISH`` or no known worker is found → ``END``.
+    2. Run the supervisor agent and extract its text decision.
+    3. Map the decision to a worker name or ``END``.
     """
 
-    def _route(state: AgentState) -> str:
+    async def _supervisor(state: AgentState, config: dict[str, Any]) -> Command:
         rounds = state.execution_meta.internal_data.get(_ROUNDS_KEY, 0)
-
         if rounds >= max_rounds:
             logger.warning("SupervisorTeam reached max_rounds=%d; terminating.", max_rounds)
-            return END
+            return Command(goto=END)
 
-        if not state.context:
-            return END
+        # Force a non-streaming call so the converter resolves to a single Message
+        # and the routing token is never emitted as a visible stream chunk.
+        exec_config = dict(config)
+        exec_config["is_stream"] = False
 
-        last = state.context[-1]
-        if last.role != "assistant":
-            return END
+        # The supervisor's past decisions are NOT persisted to context (that would
+        # leak routing tokens to the user), so it would otherwise have no memory of
+        # what it already dispatched and might re-route to a worker that is already
+        # done. Re-supply that memory privately, visible only to this LLM call —
+        # never streamed, never persisted (the real context is restored below).
+        history: list[str] = state.execution_meta.internal_data.setdefault(_ROUTE_HISTORY_KEY, [])
+        original_context = state.context
+        if history:
+            # Replay past decisions as bare assistant tokens — exactly what the
+            # supervisor used to see when its routing messages lived in context.
+            # This is the signal it relies on to know a worker already ran and to
+            # advance (or FINISH) instead of re-dispatching. Transient only.
+            replay = [Message.text_message(name, role="assistant") for name in history]
+            state.context = [*original_context, *replay]
 
-        # Extract the supervisor's response text (strip whitespace/punctuation).
-        raw = last.text().strip().strip("`.,:;'\"").upper()
+        try:
+            converter = await supervisor_agent.execute(state, exec_config)
+            message = await converter.invoke()
+        finally:
+            # Restore the real context so the breadcrumb is never persisted.
+            state.context = original_context
 
-        # Check for FINISH first.
-        if _FINISH_TOKEN in raw:
-            logger.debug("Supervisor signalled FINISH after %d round(s).", rounds)
-            return END
+        raw = (message.text() or "").strip().strip("`.,:;'\"").upper()
+        decision = _resolve_decision(raw, worker_names, rounds)
+        if decision != END:
+            history.append(decision)
+        return Command(goto=decision)
 
-        # Check each worker name with word-boundary matching to avoid false positives
-        # (e.g. worker "CODE" must not match "DECODE").
-        for name in worker_names:
-            if re.search(rf"\b{re.escape(name.upper())}\b", raw):
-                logger.debug("Supervisor routing to %s (round %d).", name, rounds)
-                return name
-
-        # No recognisable token → treat as done.
-        logger.warning("Supervisor response %r does not match any worker; terminating.", raw)
-        return END
-
-    return _route
+    _supervisor.__name__ = "supervisor"
+    return _supervisor
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +403,14 @@ class SupervisorTeamAgent[StateT: AgentState]:
         worker_names = list(self._workers.keys())
 
         # --- SUPERVISOR node ---
+        # Wrapped so the routing token (worker name / FINISH) is consumed
+        # internally and drives navigation via Command.goto instead of leaking
+        # into the conversation as an assistant message.
         supervisor_agent = self._build_supervisor_agent()
-        self._graph.add_node(_SUPERVISOR_NODE, supervisor_agent)
+        self._graph.add_node(
+            _SUPERVISOR_NODE,
+            _make_supervisor_node(supervisor_agent, worker_names, self._max_rounds),
+        )
 
         # --- PRE_SUPERVISOR node: increments round counter, then routes to SUPERVISOR ---
         self._graph.add_node(_PRE_SUPERVISOR_NODE, _make_increment_rounds_node())
@@ -391,16 +436,9 @@ class SupervisorTeamAgent[StateT: AgentState]:
                 # No tools — worker returns via PRE_SUPERVISOR to SUPERVISOR.
                 self._graph.add_edge(name, _PRE_SUPERVISOR_NODE)
 
-        # --- Conditional edges from SUPERVISOR ---
-        path_map: dict[str, str] = {END: END}
-        for name in worker_names:
-            path_map[name] = name
-
-        self._graph.add_conditional_edges(
-            _SUPERVISOR_NODE,
-            _make_supervisor_route(worker_names, self._max_rounds),
-            path_map,
-        )
+        # No static edges leave SUPERVISOR: it routes dynamically via Command.goto
+        # to a worker node or END. Worker nodes are still reachable (they appear as
+        # the source of their own outgoing edges), so graph validation passes.
 
         # --- Entry point ---
         self._graph.set_entry_point(_SUPERVISOR_NODE)

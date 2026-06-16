@@ -16,8 +16,10 @@ from agentflow.prebuilt.agent.supervisor_team import (
     SupervisorTeamAgent,
     WorkerConfig,
     _build_supervisor_prompt,
-    _make_supervisor_route,
+    _make_supervisor_node,
+    _resolve_decision,
     _ROUNDS_KEY,
+    _ROUTE_HISTORY_KEY,
     _FINISH_TOKEN,
     _SUPERVISOR_NODE,
 )
@@ -41,6 +43,29 @@ class FakeAgent(BaseAgent):
         raise NotImplementedError
 
 
+class _FakeConverter:
+    """Stands in for ModelResponseConverter — resolves to a fixed Message."""
+
+    def __init__(self, text: str):
+        self._text = text
+
+    async def invoke(self) -> Message:
+        return Message.text_message(self._text, role="assistant")
+
+
+class FakeSupervisorAgent:
+    """Supervisor stub: returns a fixed decision and records the context it saw."""
+
+    def __init__(self, decision_text: str):
+        self._decision_text = decision_text
+        self.seen_contexts: list[list[Message]] = []
+
+    async def execute(self, state: AgentState, config: dict) -> _FakeConverter:
+        # Snapshot the context (incl. any transient routing-memory tokens).
+        self.seen_contexts.append(list(state.context))
+        return _FakeConverter(self._decision_text)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -52,12 +77,6 @@ def _fake_agent(**kwargs) -> FakeAgent:
 
 def _msg(text: str, role: str = "assistant") -> Message:
     return Message.text_message(text, role=role)  # type: ignore[arg-type]
-
-
-def _state_with(*messages: Message) -> AgentState:
-    state = AgentState()
-    state.context = list(messages)
-    return state
 
 
 def _state_with_rounds(rounds: int, *messages: Message) -> AgentState:
@@ -134,73 +153,117 @@ class TestBuildSupervisorPrompt:
 
 
 # ===========================================================================
-# Tests for _make_supervisor_route
+# Tests for _resolve_decision (pure decision logic; expects normalised raw)
 # ===========================================================================
 
 
-class TestMakeSupervisorRoute:
+class TestResolveDecision:
     def test_routes_to_worker_by_name(self):
-        fn = _make_supervisor_route(["RESEARCHER", "CODER"], max_rounds=10)
-        state = _state_with(_msg("RESEARCHER"))
-        assert fn(state) == "RESEARCHER"
+        assert _resolve_decision("RESEARCHER", ["RESEARCHER", "CODER"], 0) == "RESEARCHER"
 
     def test_routes_to_end_on_finish(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=10)
-        state = _state_with(_msg("FINISH"))
-        assert fn(state) == END
-
-    def test_routes_to_end_when_max_rounds_reached(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=3)
-        state = _state_with_rounds(3, _msg("RESEARCHER"))
-        assert fn(state) == END
-
-    def test_routes_to_end_on_empty_context(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=10)
-        assert fn(AgentState()) == END
-
-    def test_routes_to_end_on_non_assistant_message(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=10)
-        state = _state_with(_msg("RESEARCHER", role="user"))
-        assert fn(state) == END
+        assert _resolve_decision("FINISH", ["RESEARCHER"], 0) == END
 
     def test_routes_to_end_when_no_match(self):
-        fn = _make_supervisor_route(["RESEARCHER", "CODER"], max_rounds=10)
-        state = _state_with(_msg("I don't know what to do."))
-        assert fn(state) == END
-
-    def test_increments_round_counter(self):
-        # The round counter is now incremented by the PRE_SUPERVISOR node,
-        # not by the routing function itself.  The routing function only
-        # reads the current counter to enforce max_rounds.
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=10)
-        state = _state_with_rounds(2, _msg("RESEARCHER"))
-        result = fn(state)
-        assert result == "RESEARCHER"
-        # Counter should NOT be mutated by the routing function.
-        assert state.execution_meta.internal_data[_ROUNDS_KEY] == 2
-
-    def test_does_not_increment_on_finish(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=10)
-        state = _state_with(_msg("FINISH"))
-        fn(state)
-        assert state.execution_meta.internal_data.get(_ROUNDS_KEY, 0) == 0
-
-    def test_case_insensitive_worker_match(self):
-        """Supervisor may respond with lowercase; matching should be case-insensitive."""
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=10)
-        state = _state_with(_msg("researcher"))
-        assert fn(state) == "RESEARCHER"
+        assert _resolve_decision("I DON'T KNOW WHAT TO DO.", ["RESEARCHER", "CODER"], 0) == END
 
     def test_first_worker_match_wins(self):
         """When multiple worker names appear, first in list wins."""
-        fn = _make_supervisor_route(["RESEARCHER", "CODER"], max_rounds=10)
-        state = _state_with(_msg("RESEARCHER and CODER"))
-        assert fn(state) == "RESEARCHER"
+        assert _resolve_decision("RESEARCHER AND CODER", ["RESEARCHER", "CODER"], 0) == "RESEARCHER"
 
-    def test_max_rounds_zero_immediately_ends(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=0)
-        state = _state_with(_msg("RESEARCHER"))
-        assert fn(state) == END
+    def test_word_boundary_match(self):
+        """Worker CODE must not match inside DECODE."""
+        assert _resolve_decision("DECODE", ["CODE"], 0) == END
+        assert _resolve_decision("CODE", ["CODE"], 0) == "CODE"
+
+
+# ===========================================================================
+# Tests for the SUPERVISOR node (_make_supervisor_node)
+# ===========================================================================
+
+
+class TestSupervisorNode:
+    @pytest.mark.asyncio
+    async def test_routes_to_worker(self):
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("RESEARCHER"), ["RESEARCHER", "CODER"], max_rounds=10
+        )
+        cmd = await node(AgentState(), {})
+        assert cmd.goto == "RESEARCHER"
+
+    @pytest.mark.asyncio
+    async def test_routes_to_end_on_finish(self):
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("FINISH"), ["RESEARCHER"], max_rounds=10
+        )
+        cmd = await node(AgentState(), {})
+        assert cmd.goto == END
+
+    @pytest.mark.asyncio
+    async def test_case_insensitive_match(self):
+        """Node upper-cases the raw response before resolving."""
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("researcher"), ["RESEARCHER"], max_rounds=10
+        )
+        cmd = await node(AgentState(), {})
+        assert cmd.goto == "RESEARCHER"
+
+    @pytest.mark.asyncio
+    async def test_max_rounds_short_circuits_without_calling_agent(self):
+        sup = FakeSupervisorAgent("RESEARCHER")
+        node = _make_supervisor_node(sup, ["RESEARCHER"], max_rounds=3)
+        state = AgentState()
+        state.execution_meta.internal_data[_ROUNDS_KEY] = 3
+        cmd = await node(state, {})
+        assert cmd.goto == END
+        assert sup.seen_contexts == []  # agent never invoked at the cap
+
+    @pytest.mark.asyncio
+    async def test_records_worker_decisions_in_history(self):
+        sup = FakeSupervisorAgent("RESEARCHER")
+        node = _make_supervisor_node(sup, ["RESEARCHER"], max_rounds=10)
+        state = AgentState()
+        await node(state, {})
+        assert state.execution_meta.internal_data[_ROUTE_HISTORY_KEY] == ["RESEARCHER"]
+
+    @pytest.mark.asyncio
+    async def test_finish_decision_not_recorded(self):
+        sup = FakeSupervisorAgent("FINISH")
+        node = _make_supervisor_node(sup, ["RESEARCHER"], max_rounds=10)
+        state = AgentState()
+        await node(state, {})
+        assert state.execution_meta.internal_data.get(_ROUTE_HISTORY_KEY) == []
+
+    @pytest.mark.asyncio
+    async def test_history_replayed_as_transient_tokens_not_persisted(self):
+        """Past decisions are shown to the supervisor's own call but never persisted."""
+        sup = FakeSupervisorAgent("FINISH")
+        node = _make_supervisor_node(sup, ["RESEARCHER"], max_rounds=10)
+        state = AgentState()
+        state.execution_meta.internal_data[_ROUTE_HISTORY_KEY] = ["RESEARCHER"]
+        original = [_msg("the shortlist", role="assistant")]
+        state.context = list(original)
+
+        await node(state, {})
+
+        # The supervisor saw a transient RESEARCHER token appended to its context...
+        seen = sup.seen_contexts[0]
+        assert any(m.role == "assistant" and m.text() == "RESEARCHER" for m in seen)
+        # ...but the real context is restored (breadcrumb not persisted).
+        assert [m.text() for m in state.context] == [m.text() for m in original]
+
+    @pytest.mark.asyncio
+    async def test_no_routing_tokens_persisted_to_context(self):
+        """The supervisor node returns a Command, never an assistant message."""
+        sup = FakeSupervisorAgent("RESEARCHER")
+        node = _make_supervisor_node(sup, ["RESEARCHER"], max_rounds=10)
+        state = AgentState()
+        state.context = [_msg("hello", role="user")]
+        cmd = await node(state, {})
+        # Command carries navigation only — no state update / message.
+        assert cmd.update is None
+        assert cmd.goto == "RESEARCHER"
+        assert [m.text() for m in state.context] == ["hello"]
 
 
 # ===========================================================================
@@ -377,14 +440,14 @@ class TestSupervisorTeamAgentCompile:
 
 class TestSupervisorAgentConfiguration:
     def test_supervisor_has_correct_model(self):
-        with patch("agentflow.prebuilt.agent.supervisor_team.Agent", FakeAgent) as MockAgent:
+        # The SUPERVISOR node is now a wrapper that drives the supervisor Agent
+        # internally, so assert the model on the agent the builder produces.
+        with patch("agentflow.prebuilt.agent.supervisor_team.Agent", FakeAgent):
             agent = SupervisorTeamAgent(
                 supervisor_model="gpt-4o-turbo", workers=_two_workers()
             )
-            agent._configure_graph()
-
-        supervisor_node: FakeAgent = agent._graph.nodes[_SUPERVISOR_NODE].func  # type: ignore
-        assert supervisor_node.model == "gpt-4o-turbo"
+            supervisor_agent: FakeAgent = agent._build_supervisor_agent()  # type: ignore
+        assert supervisor_agent.model == "gpt-4o-turbo"
 
     def test_supervisor_system_prompt_is_set(self):
         custom = [{"role": "system", "content": "Custom prompt."}]
@@ -394,10 +457,8 @@ class TestSupervisorAgentConfiguration:
                 workers=_two_workers(),
                 supervisor_system_prompt=custom,
             )
-            sta._configure_graph()
-
-        supervisor_node: FakeAgent = sta._graph.nodes[_SUPERVISOR_NODE].func  # type: ignore
-        assert supervisor_node.system_prompt == custom
+            supervisor_agent: FakeAgent = sta._build_supervisor_agent()  # type: ignore
+        assert supervisor_agent.system_prompt == custom
 
     def test_supervisor_kwargs_forwarded(self):
         """Extra kwargs like provider/temperature are forwarded to the supervisor Agent."""
@@ -445,42 +506,38 @@ class TestSupervisorAgentConfiguration:
 
 
 class TestSupervisorIntegration:
-    def test_routing_to_researcher(self):
-        fn = _make_supervisor_route(["RESEARCHER", "CODER"], max_rounds=5)
-        state = _state_with(_msg("RESEARCHER"))
-        assert fn(state) == "RESEARCHER"
+    @pytest.mark.asyncio
+    async def test_routing_to_researcher(self):
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("RESEARCHER"), ["RESEARCHER", "CODER"], max_rounds=5
+        )
+        cmd = await node(AgentState(), {})
+        assert cmd.goto == "RESEARCHER"
 
-    def test_routing_to_coder(self):
-        fn = _make_supervisor_route(["RESEARCHER", "CODER"], max_rounds=5)
-        state = _state_with(_msg("CODER"))
-        assert fn(state) == "CODER"
+    @pytest.mark.asyncio
+    async def test_routing_to_coder(self):
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("CODER"), ["RESEARCHER", "CODER"], max_rounds=5
+        )
+        cmd = await node(AgentState(), {})
+        assert cmd.goto == "CODER"
 
-    def test_finish_ends_graph(self):
-        fn = _make_supervisor_route(["RESEARCHER", "CODER"], max_rounds=5)
-        state = _state_with(_msg("FINISH"))
-        assert fn(state) == END
+    @pytest.mark.asyncio
+    async def test_finish_ends_graph(self):
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("FINISH"), ["RESEARCHER", "CODER"], max_rounds=5
+        )
+        cmd = await node(AgentState(), {})
+        assert cmd.goto == END
 
-    def test_max_rounds_ends_graph(self):
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=2)
-        state = _state_with_rounds(2, _msg("RESEARCHER"))
-        assert fn(state) == END
-
-    def test_round_counter_increments_correctly(self):
-        # The round counter is managed by the PRE_SUPERVISOR increment node;
-        # the routing function does not mutate it.
-        fn = _make_supervisor_route(["RESEARCHER"], max_rounds=5)
-        state = AgentState()
-        state.context = [_msg("RESEARCHER")]
-
-        result = fn(state)
-        assert result == "RESEARCHER"
-        # Key should not be set by routing fn
-        assert _ROUNDS_KEY not in state.execution_meta.internal_data
-
-        state.context = [_msg("RESEARCHER")]
-        result = fn(state)
-        assert result == "RESEARCHER"
-        assert _ROUNDS_KEY not in state.execution_meta.internal_data
+    @pytest.mark.asyncio
+    async def test_max_rounds_ends_graph(self):
+        node = _make_supervisor_node(
+            FakeSupervisorAgent("RESEARCHER"), ["RESEARCHER"], max_rounds=2
+        )
+        state = _state_with_rounds(2)
+        cmd = await node(state, {})
+        assert cmd.goto == END
 
     def test_compiled_swarm_has_correct_nodes(self):
         with patch("agentflow.prebuilt.agent.supervisor_team.Agent", FakeAgent):
