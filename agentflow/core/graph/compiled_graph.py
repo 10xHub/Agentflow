@@ -542,6 +542,14 @@ class CompiledGraph[StateT: AgentState]:
             if isinstance(node.func, LiveAgent)
         ]
 
+    def is_realtime(self) -> bool:
+        """Whether this graph is a realtime (live) graph.
+
+        True when the graph contains at least one ``LiveAgent`` node, meaning it must be
+        driven via ``arealtime()`` / ``realtime()`` rather than invoke/stream.
+        """
+        return bool(self._find_live_nodes())
+
     def _guard_not_realtime(self) -> None:
         """Forcing rule: a graph containing a LiveAgent must use arealtime()."""
         if self._find_live_nodes():

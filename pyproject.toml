@@ -100,6 +100,7 @@ google-genai = ["google-genai>=1.56.0"]
 realtime = ["google-genai>=1.56.0"]
 openai = ["openai>=1.77.0"]
 pg_checkpoint = ["asyncpg>=0.29.0","redis>=4.2"]
+sqlite_checkpoint = ["aiosqlite>=0.19.0"]
 mcp = ["fastmcp>=2.11.3","mcp>=1.13.0"]
 images = ["Pillow>=10.0.0"]
 cloud-storage = ["cloud-storage-manager>=0.1.2"]
@@ -112,6 +113,15 @@ a2a_sdk = ["a2a-sdk>=0.2.7"]
 otel = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
+]
+logfire = ["logfire>=3.0.0"]
+langsmith = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
+observability = [
+    "10xscale-agentflow[otel,logfire,langsmith]",
 ]
 
 all_publishers = [
@@ -281,6 +291,7 @@ module = [
     "agentflow.runtime.adapters.llm.openai_responses_converter",
     "agentflow.runtime.publisher.publish",
     "agentflow.storage.checkpointer.pg_checkpointer",
+    "agentflow.storage.checkpointer.sqlite_checkpointer",
     "agentflow.storage.media.processor",
     "agentflow.storage.store.embedding.google_embedding",
     "agentflow.storage.store.long_term_memory",
@@ -373,6 +384,7 @@ dev = [
     "mem0ai>=0.1.117",
     "google-genai>=1.56.0",
     "a2a_sdk",
-    "aiohttp"
+    "aiohttp",
+    "aiosqlite>=0.19.0"
 ]
 

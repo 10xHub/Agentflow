@@ -2,7 +2,7 @@
 
 This package provides all persistence and media-handling infrastructure:
 
-- ``agentflow.storage.checkpointer`` — agent state persistence (in-memory, Postgres)
+- ``agentflow.storage.checkpointer`` — agent state persistence (in-memory, Postgres, SQLite)
 - ``agentflow.storage.store``        — vector/long-term memory stores (Qdrant, Mem0, ...)
 - ``agentflow.storage.media``        — multimodal media processing, storage, and resolution
 """
@@ -21,6 +21,7 @@ from .checkpointer import (
     BaseCheckpointer,
     InMemoryCheckpointer,
     PgCheckpointer,
+    SqliteCheckpointer,
 )
 
 # --- Media ---
@@ -125,6 +126,7 @@ __all__ = [
     "OpenAIEmbedding",
     "PgCheckpointer",
     "ProviderMediaCache",
+    "SqliteCheckpointer",
     "QdrantStore",
     "ReadMode",
     "UserMemoryConfig",
