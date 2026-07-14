@@ -32,6 +32,7 @@ Then create a store::
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import mimetypes
 import tempfile
@@ -263,22 +264,31 @@ class CloudMediaStore(BaseMediaStore):
     async def _download_from_url(url: str) -> bytes:
         """Download bytes from a signed URL.
 
-        Prefers ``httpx`` (async), falls back to ``urllib`` (sync).
+        Prefers ``httpx`` (async). The stdlib fallback is synchronous, so it is
+        run in a worker thread: calling ``urllib.request.urlopen`` directly inside
+        an ``async def`` blocked the whole event loop for the duration of the
+        download -- stalling every other in-flight run in the process, not just
+        this one.
         """
         _validate_download_url(url)
         try:
             import httpx
-
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                return resp.content
         except ImportError:
-            # Fallback to stdlib (blocking, but functional)
-            import urllib.request
+            return await asyncio.to_thread(CloudMediaStore._download_from_url_blocking, url)
 
-            with urllib.request.urlopen(url) as resp:  # noqa: S310  # nosec B310
-                return resp.read()
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
+
+    @staticmethod
+    def _download_from_url_blocking(url: str) -> bytes:
+        """Synchronous stdlib download. Must only be called off the event loop."""
+        import urllib.request
+
+        _validate_download_url(url)
+        with urllib.request.urlopen(url) as resp:  # noqa: S310  # nosec B310
+            return resp.read()
 
 
 def _validate_download_url(url: str) -> None:

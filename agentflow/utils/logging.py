@@ -39,6 +39,9 @@ References:
     https://docs.python.org/3/howto/logging.html#configuring-logging-for-a-library
 """
 
+import contextlib
+import contextvars
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -156,9 +159,178 @@ def install_secret_redaction(logger_name: str = "agentflow") -> SecretRedactionF
     return redactor
 
 
+# ── Run correlation ──────────────────────────────────────────────────────────
+#
+# Logs carried no run_id or thread_id, so on a busy server you could not pull out
+# the lines belonging to ONE run: an operator debugging a single failing thread had
+# to eyeball interleaved output from every concurrent execution. These context
+# variables are set once when a run starts and are attached to every record emitted
+# underneath it -- including from library code that knows nothing about them.
+#
+# contextvars (not thread-locals) because runs are asyncio tasks: a thread-local
+# would bleed between concurrently interleaved runs on the same event loop.
+
+_run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agentflow_run_id", default=None
+)
+_thread_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agentflow_thread_id", default=None
+)
+_user_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agentflow_user_id", default=None
+)
+_node_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agentflow_node", default=None
+)
+
+_CORRELATION_FIELDS = ("run_id", "thread_id", "user_id", "node")
+
+
+def get_log_context() -> dict[str, str]:
+    """Return the correlation fields currently in scope."""
+    values = {
+        "run_id": _run_id_var.get(),
+        "thread_id": _thread_id_var.get(),
+        "user_id": _user_id_var.get(),
+        "node": _node_var.get(),
+    }
+    return {k: v for k, v in values.items() if v is not None}
+
+
+def set_log_context(
+    run_id: str | None = None,
+    thread_id: str | None = None,
+    user_id: str | None = None,
+    node: str | None = None,
+) -> None:
+    """Bind correlation fields for the current async context.
+
+    Called by the execution loop at the start of a run (and when entering a node),
+    so every log line emitted during it can be filtered by run_id/thread_id.
+    """
+    if run_id is not None:
+        _run_id_var.set(str(run_id))
+    if thread_id is not None:
+        _thread_id_var.set(str(thread_id))
+    if user_id is not None:
+        _user_id_var.set(str(user_id))
+    if node is not None:
+        _node_var.set(str(node))
+
+
+def bind_log_context_from_config(config: dict) -> None:
+    """Bind correlation fields from a run config."""
+    set_log_context(
+        run_id=config.get("run_id"),
+        thread_id=config.get("thread_id"),
+        user_id=config.get("user_id"),
+    )
+
+
+class CorrelationFilter(logging.Filter):
+    """Attach the current run's correlation fields to every log record.
+
+    A filter rather than a formatter, so the fields land on the record itself and
+    are available to ANY formatter or handler downstream (including a user's own
+    JSON handler, or an APM agent), not just ours.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        context = get_log_context()
+        for field in _CORRELATION_FIELDS:
+            if not hasattr(record, field):
+                setattr(record, field, context.get(field))
+        return True
+
+
+class JsonFormatter(logging.Formatter):
+    """Emit one JSON object per line, with the correlation fields promoted.
+
+    Structured output is what makes logs queryable ("show me every ERROR for
+    thread X"), which plain text and f-string interpolation cannot support.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, object] = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        for field in _CORRELATION_FIELDS:
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
+
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+
+        # Anything the caller passed via `extra=`.
+        for key, value in record.__dict__.items():
+            if key not in _RESERVED_LOG_RECORD_KEYS and key not in payload:
+                with contextlib.suppress(TypeError, ValueError):
+                    json.dumps(value)  # only include what is serializable
+                    payload[key] = value
+
+        return json.dumps(payload, default=str)
+
+
+# Attributes present on every LogRecord; anything else came from `extra=`.
+_RESERVED_LOG_RECORD_KEYS = frozenset(
+    {
+        "args", "asctime", "created", "exc_info", "exc_text", "filename",
+        "funcName", "levelname", "levelno", "lineno", "module", "msecs",
+        "msg", "name", "pathname", "process", "processName", "relativeCreated",
+        "stack_info", "taskName", "thread", "threadName",
+        *_CORRELATION_FIELDS,
+    }
+)
+
+
+def setup_structured_logging(
+    level: int = logging.INFO,
+    json_format: bool = True,
+    redact_secrets: bool = True,
+    logger_name: str = "agentflow",
+) -> logging.Handler:
+    """Configure Agentflow logging for production: correlated and queryable.
+
+    Adds the correlation filter (so every record carries run_id/thread_id), a JSON
+    formatter, and secret redaction. Returns the installed handler.
+
+    This is opt-in: library code still never configures logging by itself.
+    """
+    target = logging.getLogger(logger_name)
+    target.setLevel(level)
+
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    handler.setFormatter(
+        JsonFormatter()
+        if json_format
+        else logging.Formatter(
+            "[%(asctime)s] %(levelname)s %(name)s "
+            "[run=%(run_id)s thread=%(thread_id)s node=%(node)s]: %(message)s"
+        )
+    )
+    handler.addFilter(CorrelationFilter())
+    if redact_secrets:
+        handler.addFilter(SecretRedactionFilter())
+
+    target.addHandler(handler)
+    return handler
+
+
 __all__ = [
+    "CorrelationFilter",
+    "JsonFormatter",
     "SecretRedactionFilter",
+    "bind_log_context_from_config",
+    "get_log_context",
     "install_secret_redaction",
     "logger",
     "mask_secrets",
+    "set_log_context",
+    "setup_structured_logging",
 ]

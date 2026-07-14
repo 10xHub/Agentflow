@@ -25,6 +25,7 @@ from typing import Any, TypeVar
 
 from injectq import Inject
 
+from agentflow.core.exceptions import GraphError
 from agentflow.core.state import AgentState, ExecutionStatus, Message
 from agentflow.core.state.base_context import BaseContextManager
 from agentflow.core.state.execution_state import ExecutionState as ExecMeta
@@ -161,6 +162,11 @@ async def load_or_create_state[StateT: AgentState](  # noqa: PLR0912, PLR0915
 
     # Try to load existing state if checkpointer is available
     if checkpointer:
+        # A stop request that was never consumed (the previous run finished or
+        # died before reaching its next stop check) would otherwise be waiting to
+        # kill this run at its first node. A new run supersedes it.
+        await checkpointer.aclear_stop_request(config)
+
         logger.debug("Attempting to load existing state from checkpointer")
         # first check realtime-synced state
         existing_state: StateT | None = await checkpointer.aget_state_cache(config)
@@ -176,6 +182,12 @@ async def load_or_create_state[StateT: AgentState](  # noqa: PLR0912, PLR0915
                 existing_state.execution_meta.current_node,
                 existing_state.execution_meta.step,
             )
+            # A stop that interrupted an earlier run is persisted in the state and
+            # is never cleared by set_interrupt, so a thread stopped mid-run would
+            # carry STOP_REQUESTED into its next run and stop itself again at the
+            # first node. Starting a run supersedes any prior stop request.
+            existing_state.execution_meta.stop_current_execution = StopRequestStatus.NONE
+
             # Normalize legacy node names (backward compatibility)
             # Some older runs may have persisted 'start'/'end' instead of '__start__'/'__end__'
             if existing_state.execution_meta.current_node == "start":
@@ -506,19 +518,39 @@ def get_next_node(
     # Handle conditional edges
     for edge in outgoing_edges:
         if edge.condition:
+            # A condition that raises used to be swallowed with `continue`, so the
+            # graph quietly fell through to the first static edge -- or to END --
+            # and the run took a path nobody chose. Silent misrouting is worse than
+            # a failed run: the caller gets a confident, wrong answer. Routing is a
+            # correctness decision, so a broken condition fails the run instead.
             try:
                 condition_result = edge.condition(state)
-                if hasattr(edge, "condition_result") and edge.condition_result is not None:
-                    # Mapped conditional edge
-                    if condition_result == edge.condition_result:
-                        return edge.to_node
-                elif isinstance(condition_result, str):
-                    return condition_result
-                elif condition_result:
+            except Exception as e:
+                logger.exception(
+                    "Condition for edge %s -> %s raised; cannot route",
+                    edge.from_node,
+                    edge.to_node,
+                )
+                raise GraphError(
+                    message=(
+                        f"Conditional edge from '{edge.from_node}' raised while routing: {e}"
+                    ),
+                    error_code="GRAPH_ROUTING_001",
+                    context={
+                        "from_node": edge.from_node,
+                        "to_node": edge.to_node,
+                        "error_type": type(e).__name__,
+                    },
+                ) from e
+
+            if hasattr(edge, "condition_result") and edge.condition_result is not None:
+                # Mapped conditional edge
+                if condition_result == edge.condition_result:
                     return edge.to_node
-            except Exception:
-                logger.exception("Error evaluating condition for edge: %s", edge)
-                continue
+            elif isinstance(condition_result, str):
+                return condition_result
+            elif condition_result:
+                return edge.to_node
 
     # Return first static edge if no conditions matched
     static_edges = [e for e in outgoing_edges if not e.condition]
@@ -569,14 +601,15 @@ async def sync_data(
             is_context_trimmed=is_context_trimmed,
         )
 
-    # first sync with realtime then main db
-    await call_realtime_sync(state, config, checkpointer)
-    logger.debug("Persisting state and %d messages to checkpointer", len(messages))
-
     if checkpointer:
-        await checkpointer.aput_state(config, new_state)
-        if messages:
-            await checkpointer.aput_messages(config, messages)
+        logger.debug("Persisting state and %d messages to checkpointer", len(messages))
+        # Durable store is the source of truth: write state + messages atomically
+        # FIRST (audit M7), so a failure surfaces before the cache is updated and
+        # the cache can never hold state that was never persisted (audit B5).
+        await checkpointer.aput_checkpoint(config, new_state, messages)
+        # Then refresh the realtime cache with the SAME trimmed state we just
+        # persisted, so cache and durable store never diverge in shape (audit M6).
+        await checkpointer.aput_state_cache(config, new_state)
 
     return is_context_trimmed
 

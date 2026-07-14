@@ -57,11 +57,15 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         # Thread storage
         self._threads: dict[str, dict[str, Any]] = {}
 
+        # Tool execution ledger (idempotency): "<thread>:<tool_call_id>" -> result
+        self._tool_results: dict[str, dict[str, Any]] = {}
+
         # Async locks for concurrent access
         self._state_lock = asyncio.Lock()
         self._cache_lock = asyncio.Lock()
         self._messages_lock = asyncio.Lock()
         self._threads_lock = asyncio.Lock()
+        self._tool_lock = asyncio.Lock()
 
     def setup(self) -> Any:
         """
@@ -200,6 +204,32 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
                 self._generic_cache.pop(cache_key, None)
                 return None
             return value
+
+    # -------------------------
+    # Tool execution ledger
+    # -------------------------
+    def _tool_key(self, config: dict[str, Any], tool_call_id: str) -> str:
+        return f"{self._get_config_key(config)}:{tool_call_id}"
+
+    async def aget_tool_result(
+        self,
+        config: dict[str, Any],
+        tool_call_id: str,
+    ) -> dict[str, Any] | None:
+        """Return a recorded tool result, so a replayed tool call is not re-fired."""
+        async with self._tool_lock:
+            return self._tool_results.get(self._tool_key(config, tool_call_id))
+
+    async def aput_tool_result(
+        self,
+        config: dict[str, Any],
+        tool_call_id: str,
+        result: dict[str, Any],
+    ) -> Any | None:
+        """Record that a tool call completed, with its result."""
+        async with self._tool_lock:
+            self._tool_results[self._tool_key(config, tool_call_id)] = result
+            return True
 
     async def aclear_cache_value(self, namespace: str, key: str) -> Any | None:
         cache_key = f"{namespace}:{key}"
@@ -517,13 +547,20 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             bool: True if released.
         """
-        async with self._state_lock, self._cache_lock, self._messages_lock, self._threads_lock:
+        async with (
+            self._state_lock,
+            self._cache_lock,
+            self._messages_lock,
+            self._threads_lock,
+            self._tool_lock,
+        ):
             self._states.clear()
             self._state_cache.clear()
             self._generic_cache.clear()
             self._messages.clear()
             self._message_metadata.clear()
             self._threads.clear()
+            self._tool_results.clear()
             logger.info("Released all in-memory resources")
             return True
 

@@ -24,9 +24,11 @@ from typing import Any, TypeVar
 from injectq import Inject
 
 from agentflow.core.state import AgentState, ExecutionStatus
+from agentflow.core.state.execution_state import StopRequestStatus
 from agentflow.core.state.message import Message
 from agentflow.runtime.publisher.events import EventModel, EventType
 from agentflow.runtime.publisher.publish import publish_event
+from agentflow.storage.checkpointer import BaseCheckpointer
 from agentflow.utils import (
     START,
 )
@@ -215,17 +217,34 @@ async def check_stop_requested[StateT: AgentState](
     messages: list[Message],
     config: dict[str, Any],
     callback_mgr: CallbackManager = Inject[CallbackManager],
+    checkpointer: BaseCheckpointer = Inject[BaseCheckpointer],
 ) -> bool:
     """Check if a stop has been requested externally."""
     state = await reload_state(config, state)  # type: ignore
 
+    # A stop request lives in its own checkpointer key, NOT in the cached state.
+    # This loop rewrites the state cache after every node, so a flag carried in
+    # the state blob can be overwritten by our own flag-less copy before we get
+    # here. The dedicated key is never written by the loop, so it survives.
+    # The state blob is still consulted, so a custom checkpointer that does not
+    # back the stop key keeps working the way it did before.
+    stop_requested = state.is_stopped_requested()
+    if not stop_requested and checkpointer:
+        stop_requested = await checkpointer.ais_stop_requested(config)
+        if stop_requested:
+            state.execution_meta.stop_current_execution = StopRequestStatus.STOP_REQUESTED
+
     # Check if a stop was requested externally (e.g., frontend)
-    if state.is_stopped_requested():
+    if stop_requested:
         logger.info(
             "Stop requested for thread '%s' at node '%s'",
             config.get("thread_id"),
             current_node,
         )
+        # Consume the request so it cannot leak into the next run on this thread.
+        if checkpointer:
+            await checkpointer.aclear_stop_request(config)
+
         state.set_interrupt(
             current_node,
             "stop_requested",

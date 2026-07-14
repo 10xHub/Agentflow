@@ -15,11 +15,13 @@ This package provides:
 from .graph_error import GraphError
 from .node_error import NodeError
 from .recursion_error import GraphRecursionError
+from .timeout_error import GraphStopRequested, NodeTimeoutError
 from .storage_exceptions import (
     MetricsError,
     ResourceNotFoundError,
     SchemaVersionError,
     SerializationError,
+    StaleStateError,
     StorageError,
     TransientStorageError,
 )
@@ -28,11 +30,14 @@ from .storage_exceptions import (
 __all__ = [
     "GraphError",
     "GraphRecursionError",
+    "GraphStopRequested",
     "MetricsError",
     "NodeError",
+    "NodeTimeoutError",
     "ResourceNotFoundError",
     "SchemaVersionError",
     "SerializationError",
+    "StaleStateError",
     "StorageError",
     "TransientStorageError",
 ]

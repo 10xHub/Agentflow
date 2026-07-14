@@ -116,8 +116,12 @@ class QdrantStore(BaseStore):
             port = port or 6333
             self.client = AsyncQdrantClient(host=host, port=port, api_key=api_key, **kwargs)
 
-        # Cache for collection existence checks
+        # Cache for collection existence checks, so the network round-trip happens
+        # once per collection rather than on every store/search/get.
         self._collection_cache = set()
+        # Serializes the cold-start miss: without it, N concurrent first-requests
+        # all miss the cache together and each issues its own create_collection.
+        self._collection_lock = asyncio.Lock()
         self._setup_lock = asyncio.Lock()
 
         self.collection = collection or DEFAULT_COLLECTION
@@ -237,12 +241,35 @@ class QdrantStore(BaseStore):
         return Filter(must=conditions) if conditions else None
 
     async def _ensure_collection_exists(self, collection: str) -> None:
-        """Ensure collection exists, create if not."""
+        """Ensure collection exists, create if not.
+
+        The `_collection_cache` fast path means the network round-trip happens once
+        per collection, not on every store/search/get. The lock closes the cold-start
+        race: without it, N concurrent first-requests all missed the cache together
+        and each issued its own get_collections()/create_collection() call.
+        """
         if collection in self._collection_cache:
             return
 
         from qdrant_client.http.models import PayloadSchemaType, VectorParams
 
+        async with self._collection_lock:
+            # Re-check under the lock: another coroutine may have ensured it while
+            # we were waiting.
+            if collection in self._collection_cache:
+                return
+
+            await self._ensure_collection_exists_locked(
+                collection, PayloadSchemaType, VectorParams
+            )
+
+    async def _ensure_collection_exists_locked(
+        self,
+        collection: str,
+        PayloadSchemaType,  # noqa: N803
+        VectorParams,  # noqa: N803
+    ) -> None:
+        """Create the collection and its payload indexes. Caller holds the lock."""
         try:
             # Check if collection exists
             collections = await self.client.get_collections()

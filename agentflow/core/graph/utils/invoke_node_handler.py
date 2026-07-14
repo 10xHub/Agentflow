@@ -15,6 +15,7 @@ Usage:
 """
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
@@ -23,10 +24,14 @@ from typing import TYPE_CHECKING, Any, Union
 
 from injectq import Inject
 
-from agentflow.core.exceptions import NodeError
+from agentflow.core.exceptions import NodeError, NodeTimeoutError
 from agentflow.core.graph.tool_node import ToolNode
+from agentflow.core.graph.utils.guards import execute_with_guards, resolve_timeout
 from agentflow.core.graph.utils.utils import process_node_result
 from agentflow.core.state import AgentState, Message
+from agentflow.core.state.message_block import ToolResultBlock
+from agentflow.storage.checkpointer import BaseCheckpointer
+from agentflow.utils.constants import DEFAULT_TOOL_TIMEOUT_SECONDS
 from agentflow.runtime.publisher.events import ContentType, Event, EventModel, EventType
 from agentflow.runtime.publisher.publish import publish_event
 from agentflow.utils import (
@@ -34,6 +39,7 @@ from agentflow.utils import (
     CallbackManager,
     InvocationType,
     call_sync_or_async,
+    metrics,
 )
 from agentflow.utils.command import Command
 
@@ -74,26 +80,94 @@ class InvokeNodeHandler(BaseLoggingMixin):
         self.name = name
         self.func = func
 
+    @staticmethod
+    def _ledger_key(origin_message_id: str | None, tool_call_id: str) -> str | None:
+        """Identity of one tool invocation, for the idempotency ledger.
+
+        A ``tool_call_id`` alone is NOT unique over a thread's lifetime -- models
+        reuse ids like ``call_1`` on every turn. Keying the ledger on it alone
+        would make a later turn collide with an earlier one and silently skip a
+        tool that had never run.
+
+        What uniquely identifies an invocation is the assistant message that
+        issued it plus the call id. That message is persisted, so on replay it
+        carries the same ``message_id`` and the key is stable -- which is exactly
+        what makes replay detection work, while different turns never collide.
+        """
+        if not tool_call_id or not origin_message_id:
+            return None
+        return f"{origin_message_id}:{tool_call_id}"
+
     async def _handle_single_tool(
         self,
         tool_call: dict[str, Any],
         state: AgentState,
         config: dict[str, Any],
+        origin_message_id: str | None = None,
+        checkpointer: BaseCheckpointer = Inject[BaseCheckpointer],
     ) -> dict[str, Any] | Message:
         """
         Execute a single tool call using the ToolNode.
+
+        Idempotent across replays: the execution loop persists ``current_node``
+        before running a node and only advances it after the node completes, so a
+        process killed mid-node resumes by re-running that node from scratch. Any
+        tool that already fired would fire again -- charging the card twice. Before
+        calling a tool we therefore consult the checkpointer's tool ledger, and we
+        record each completed call as soon as it returns.
 
         Args:
             tool_call (dict): Tool call specification.
             state (AgentState): Current agent state.
             config (dict): Node configuration.
+            checkpointer: Provides the durable tool-execution ledger.
 
         Returns:
             dict[str, Any]: Resulting data from tool execution.
         """
         function_name = tool_call.get("function", {}).get("name", "")
-        function_args: dict = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
         tool_call_id = tool_call.get("id", "")
+        raw_args = tool_call.get("function", {}).get("arguments", "{}")
+
+        # Replay guard: if this exact tool call already completed, reuse its
+        # recorded result instead of invoking the tool a second time.
+        ledger_key = self._ledger_key(origin_message_id, tool_call_id)
+        if checkpointer and ledger_key:
+            recorded = await self._get_recorded_tool_result(checkpointer, config, ledger_key)
+            if recorded is not None:
+                logger.info(
+                    "Node '%s': tool '%s' (call %s) already executed; "
+                    "replaying recorded result instead of re-running it",
+                    self.name,
+                    function_name,
+                    tool_call_id,
+                )
+                return recorded
+
+        # An LLM can emit malformed JSON here. Parsing it outside a try meant a
+        # single bad tool call raised JSONDecodeError straight through gather,
+        # failing the whole node with a raw decode error and orphaning its
+        # sibling tool tasks. A bad call is the model's mistake, so report it back
+        # to the model as a tool error and let it correct itself.
+        try:
+            function_args: dict = json.loads(raw_args or "{}")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(
+                "Node '%s': tool '%s' called with malformed arguments: %s",
+                self.name,
+                function_name,
+                e,
+            )
+            return Message.tool_message(
+                content=[
+                    ToolResultBlock(
+                        call_id=tool_call_id,
+                        output=f"Invalid tool arguments (not valid JSON): {e}",
+                        is_error=True,
+                        status="failed",
+                    )
+                ],
+            )
 
         logger.info(
             "Node '%s' executing tool '%s' with %d arguments",
@@ -103,17 +177,139 @@ class InvokeNodeHandler(BaseLoggingMixin):
         )
         logger.debug("Tool arguments: %s", function_args)
 
-        # Execute the tool function with injectable parameters
-        tool_result = await self.func.invoke(  # type: ignore
-            function_name,  # type: ignore
-            function_args,
-            tool_call_id=tool_call_id,
-            state=state,
-            config=config,
-        )
+        # Bound the call: a tool that hangs (half-open socket, unresponsive MCP
+        # server) would otherwise block the node -- and therefore the whole run --
+        # forever, since the LLM SDK timeout does not cover tool execution.
+        timeout = resolve_timeout(config, "tool_timeout", DEFAULT_TOOL_TIMEOUT_SECONDS)
+
+        tool_attrs = {"node": self.name, "tool": function_name}
+        metrics.counter("agentflow.tool.calls").inc(attributes=tool_attrs)
+
+        with metrics.timer("agentflow.tool.duration", attributes=tool_attrs):
+            tool_result = await self._invoke_tool_guarded(
+                function_name, function_args, tool_call_id, state, config, timeout, tool_attrs
+            )
+
         logger.debug("Node '%s' tool execution completed successfully", self.name)
 
+        # Record the completed call immediately. The side effect has already
+        # happened; persisting that fact now is what stops a crash later in this
+        # same node from re-firing it on replay.
+        if checkpointer and ledger_key:
+            await self._record_tool_result(checkpointer, config, ledger_key, tool_result)
+
         return tool_result
+
+    async def _invoke_tool_guarded(
+        self,
+        function_name: str,
+        function_args: dict,
+        tool_call_id: str,
+        state: AgentState,
+        config: dict[str, Any],
+        timeout: float | None,
+        tool_attrs: dict[str, str],
+    ):
+        """Run the tool under its deadline, counting timeouts and errors."""
+        try:
+            return await execute_with_guards(
+                self.func.invoke(  # type: ignore
+                    function_name,  # type: ignore
+                    function_args,
+                    tool_call_id=tool_call_id,
+                    state=state,
+                    config=config,
+                ),
+                timeout=timeout,
+                on_timeout=lambda: NodeTimeoutError(
+                    message=(
+                        f"Tool '{function_name}' exceeded its timeout of {timeout}s "
+                        f"and was cancelled"
+                    ),
+                    error_code="NODE_TIMEOUT_002",
+                    context={
+                        "node_name": self.name,
+                        "tool_name": function_name,
+                        "timeout": timeout,
+                    },
+                ),
+            )
+        except NodeTimeoutError:
+            metrics.counter("agentflow.tool.timeouts").inc(attributes=tool_attrs)
+            raise
+        except Exception:
+            metrics.counter("agentflow.tool.errors").inc(attributes=tool_attrs)
+            raise
+
+    async def _get_recorded_tool_result(
+        self,
+        checkpointer: "BaseCheckpointer",
+        config: dict[str, Any],
+        tool_call_id: str,
+    ) -> Message | dict[str, Any] | None:
+        """Load a previously recorded tool result and rehydrate it."""
+        try:
+            recorded = await checkpointer.aget_tool_result(config, tool_call_id)
+        except Exception as e:  # a ledger read must never take the run down
+            logger.warning(
+                "Node '%s': could not read tool ledger for call %s (%s); "
+                "the tool will run again",
+                self.name,
+                tool_call_id,
+                e,
+            )
+            return None
+
+        # Only a well-formed ledger entry counts as a hit. Anything else (a
+        # backend returning an unexpected shape, a test double) must be treated as
+        # "no record" and the tool run normally -- silently skipping a tool because
+        # we misread the ledger would be far worse than running it.
+        if not isinstance(recorded, dict):
+            return None
+
+        kind = recorded.get("__kind__")
+        if kind == "message":
+            try:
+                return Message.model_validate(recorded["value"])
+            except Exception as e:
+                logger.warning(
+                    "Node '%s': tool ledger entry for call %s is unreadable (%s); "
+                    "the tool will run again",
+                    self.name,
+                    tool_call_id,
+                    e,
+                )
+                return None
+        if kind == "raw":
+            return recorded.get("value")
+        return None
+
+    async def _record_tool_result(
+        self,
+        checkpointer: "BaseCheckpointer",
+        config: dict[str, Any],
+        tool_call_id: str,
+        tool_result: Any,
+    ) -> None:
+        """Durably record a completed tool call against its tool_call_id."""
+        if isinstance(tool_result, Message):
+            payload = {"__kind__": "message", "value": tool_result.model_dump(mode="json")}
+        else:
+            payload = {"__kind__": "raw", "value": tool_result}
+
+        try:
+            await checkpointer.aput_tool_result(config, tool_call_id, payload)
+        except Exception as e:
+            # The tool already ran. We could not record that, so a replay of this
+            # node would run it again. Surface it loudly rather than pretending
+            # the run is idempotent when it is not.
+            logger.error(
+                "Node '%s': tool call %s COMPLETED but could not be recorded (%s). "
+                "If this run is replayed, the tool may execute a second time.",
+                self.name,
+                tool_call_id,
+                e,
+            )
 
     async def _call_tools(
         self,
@@ -173,13 +369,88 @@ class InvokeNodeHandler(BaseLoggingMixin):
                 len(last_message.tools_calls),
             )
 
-            tasks = [
-                self._handle_single_tool(tool_call, state, config)
-                for tool_call in last_message.tools_calls
+            # The assistant message that issued these calls is what makes each
+            # invocation uniquely identifiable for the idempotency ledger.
+            origin_message_id = getattr(last_message, "message_id", None)
+
+            # Branch isolation. Tools mutate the injected state in place, so
+            # handing every parallel tool the SAME object let them race: two tools
+            # writing different fields still clobbered each other. Each branch now
+            # gets its own copy, and we merge them afterwards against a baseline so
+            # only fields a branch actually changed are written back.
+            #
+            # A single tool call cannot race with anything, so it keeps operating
+            # directly on the shared state -- no copying cost in the common case.
+            is_parallel = len(last_message.tools_calls) > 1
+            baseline = copy.deepcopy(state) if is_parallel else None
+            branch_states = [
+                copy.deepcopy(state) if is_parallel else state
+                for _ in last_message.tools_calls
             ]
 
-            # asyncio.gather preserves the order corresponding to the tasks list
-            result = await asyncio.gather(*tasks)
+            tasks = [
+                asyncio.ensure_future(
+                    self._handle_single_tool(
+                        tool_call,
+                        branch,
+                        config,
+                        origin_message_id=origin_message_id,
+                    )
+                )
+                for tool_call, branch in zip(
+                    last_message.tools_calls, branch_states, strict=True
+                )
+            ]
+
+            # gather(...) without return_exceptions let one failing tool propagate
+            # immediately while its siblings were left running -- never cancelled,
+            # never awaited. Collect every outcome instead, so a single tool error
+            # cannot orphan the others, then convert failures into tool-error
+            # messages the model can actually see and react to.
+            # gather preserves the order corresponding to the tasks list.
+            settled = await asyncio.gather(*tasks, return_exceptions=True)
+
+            result = []
+            for tool_call, outcome in zip(last_message.tools_calls, settled, strict=True):
+                if isinstance(outcome, BaseException):
+                    fn_name = tool_call.get("function", {}).get("name", "")
+                    logger.error(
+                        "Node '%s': tool '%s' failed: %s",
+                        self.name,
+                        fn_name,
+                        outcome,
+                    )
+                    result.append(
+                        Message.tool_message(
+                            content=[
+                                ToolResultBlock(
+                                    call_id=tool_call.get("id", ""),
+                                    output=f"Tool '{fn_name}' failed: {outcome}",
+                                    is_error=True,
+                                    status="failed",
+                                )
+                            ],
+                        )
+                    )
+                else:
+                    result.append(outcome)
+
+            if is_parallel:
+                # Fold each branch back into the shared state. A tool may either
+                # have mutated its injected branch in place, or returned a state
+                # explicitly; prefer the returned one, else use the branch object.
+                for branch, outcome in zip(branch_states, result, strict=True):
+                    effective = branch
+                    if isinstance(outcome, dict) and isinstance(outcome.get("state"), AgentState):
+                        effective = outcome["state"]
+                    self._merge_tool_state(state, effective, baseline=baseline)
+
+                # The state is now merged. Drop it from the result payloads so the
+                # downstream normalizer cannot merge it a SECOND time -- a double
+                # apply through a reducer would duplicate the branch's changes.
+                for outcome in result:
+                    if isinstance(outcome, dict):
+                        outcome.pop("state", None)
         else:
             # No tool calls to execute, return available tools
             logger.exception("Node '%s': No tool calls to execute", self.name)
@@ -210,12 +481,77 @@ class InvokeNodeHandler(BaseLoggingMixin):
             context={"node_name": self.name},
         )
 
-    def _merge_tool_state(self, target_state: AgentState, tool_state: AgentState) -> None:
-        """Merge tool-produced state fields into the target state."""
-        for field_name in tool_state.model_fields:
+    @staticmethod
+    def _get_field_reducer(state: AgentState, field_name: str) -> Callable | None:
+        """Return the reducer annotated on a state field, if it has one.
+
+        Reducers are declared as Annotated metadata, e.g.
+        ``context: Annotated[list[Message], add_messages]``. When two parallel
+        branches both change a field, the reducer is how the framework is told to
+        combine them rather than pick a winner.
+        """
+        field = type(state).model_fields.get(field_name)
+        for meta in getattr(field, "metadata", None) or []:
+            if callable(meta):
+                return meta
+        return None
+
+    def _merge_tool_state(
+        self,
+        target_state: AgentState,
+        tool_state: AgentState,
+        baseline: AgentState | None = None,
+    ) -> None:
+        """Merge one tool branch's state into the target.
+
+        Previously every parallel tool mutated ONE shared state object and this
+        method blindly `setattr` every field from it, so two tools touching
+        different fields still clobbered each other: whichever merged last wrote
+        back its own (stale) copy of the field the other had just changed.
+        Non-deterministic lost updates.
+
+        Now each branch runs on its own copy, and merging is field-by-field
+        against the pre-tool `baseline`:
+
+        - a field the branch did NOT change is skipped, so it can never overwrite
+          a sibling's write;
+        - a field that changed and has a reducer is combined with the reducer;
+        - a field that changed with no reducer is written, and if a sibling also
+          changed it we warn -- that is a genuine conflict only the developer can
+          resolve (by declaring a reducer).
+        """
+        for field_name in type(tool_state).model_fields:
             if field_name in ("context", "context_summary", "execution_meta"):
                 continue
-            setattr(target_state, field_name, getattr(tool_state, field_name))
+
+            new_value = getattr(tool_state, field_name, None)
+
+            if baseline is not None:
+                original = getattr(baseline, field_name, None)
+                if new_value == original:
+                    # This branch left the field alone; leave a sibling's write intact.
+                    continue
+
+                reducer = self._get_field_reducer(tool_state, field_name)
+                if reducer is not None:
+                    setattr(
+                        target_state,
+                        field_name,
+                        reducer(getattr(target_state, field_name), new_value),
+                    )
+                    continue
+
+                current = getattr(target_state, field_name, None)
+                if current != original:
+                    logger.warning(
+                        "Node '%s': parallel tools both wrote state field '%s' and it has "
+                        "no reducer; keeping the last write. Annotate the field with a "
+                        "reducer to make this deterministic.",
+                        self.name,
+                        field_name,
+                    )
+
+            setattr(target_state, field_name, new_value)
 
     def _extract_tool_messages(self, result_item: dict[str, Any]) -> list[Message]:
         """Extract tool messages from either legacy or normalized payload keys."""

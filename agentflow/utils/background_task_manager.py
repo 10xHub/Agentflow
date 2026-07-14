@@ -17,6 +17,17 @@ from agentflow.utils import metrics
 
 logger = logging.getLogger("agentflow.utils")
 
+# Cap on in-flight background tasks (publisher emits, mostly).
+#
+# These are fire-and-forget: every graph event spawns one. With no cap, a sink
+# that is slow or down (unreachable broker) meant the task set -- and every event
+# object it retained -- grew without bound until the process ran out of memory.
+# A bound turns that into visible, counted load-shedding instead.
+DEFAULT_MAX_PENDING_TASKS = 1000
+
+# Don't log a warning on every dropped task; that would itself become the flood.
+DROP_WARNING_INTERVAL_SECONDS = 5.0
+
 
 @dataclass
 class TaskMetadata:
@@ -41,18 +52,55 @@ class BackgroundTaskManager:
         # All tasks automatically cleaned up on exit
     """
 
-    def __init__(self, default_shutdown_timeout: float = 30.0):
+    def __init__(
+        self,
+        default_shutdown_timeout: float = 30.0,
+        max_pending_tasks: int = DEFAULT_MAX_PENDING_TASKS,
+    ):
         """
         Initialize the BackgroundTaskManager.
 
         Args:
             default_shutdown_timeout: Default timeout for graceful shutdown in seconds.
+            max_pending_tasks: Cap on in-flight tasks. Beyond this, new tasks are
+                dropped rather than queued (see :meth:`create_task`). Set to 0 to
+                disable the cap (restores the old unbounded behaviour).
         """
         self._tasks: set[asyncio.Task] = set()
         self._task_metadata: dict[asyncio.Task, TaskMetadata] = {}
         self._shutdown_timeout = default_shutdown_timeout
         self._is_shutdown = False
         self._shutdown_lock = asyncio.Lock()
+        self._max_pending_tasks = max_pending_tasks
+        self._dropped_tasks = 0
+        self._last_drop_warning = 0.0
+
+    @property
+    def pending_count(self) -> int:
+        """Number of tasks currently in flight."""
+        return len(self._tasks)
+
+    @property
+    def dropped_count(self) -> int:
+        """How many tasks have been dropped due to backpressure."""
+        return self._dropped_tasks
+
+    def _record_drop(self, name: str) -> None:
+        """Count a dropped task and warn, but not on every single drop."""
+        self._dropped_tasks += 1
+        metrics.counter("background_task_manager.tasks_dropped").inc()
+
+        now = time.time()
+        if now - self._last_drop_warning >= DROP_WARNING_INTERVAL_SECONDS:
+            self._last_drop_warning = now
+            logger.warning(
+                "Background task queue is full (%d in flight); dropping task '%s'. "
+                "%d dropped so far. The sink (publisher) is not keeping up -- events "
+                "are being shed to protect memory.",
+                len(self._tasks),
+                name,
+                self._dropped_tasks,
+            )
 
     def create_task(
         self,
@@ -61,9 +109,19 @@ class BackgroundTaskManager:
         name: str = "background_task",
         timeout: float | None = None,
         context: dict[str, Any] | None = None,
-    ) -> asyncio.Task:
+    ) -> asyncio.Task | None:
         """
         Create and track a background asyncio task.
+
+        Applies backpressure: tasks were previously spawned into an unbounded set,
+        so a slow or dead sink (a publisher whose broker is unreachable) grew that
+        set forever -- one leaked task and one retained event per emit, until the
+        process died of memory exhaustion. Beyond `max_pending_tasks` the new task
+        is dropped instead.
+
+        Dropping the NEWEST is deliberate: these are fire-and-forget telemetry
+        events, so shedding load is strictly better than unbounded growth, and
+        cancelling already-running tasks would lose work that is mid-flight.
 
         Args:
             coro (Coroutine): The coroutine to run in the background.
@@ -72,8 +130,15 @@ class BackgroundTaskManager:
             context (Optional[dict]): Additional context for logging.
 
         Returns:
-            asyncio.Task: The created task.
+            asyncio.Task: The created task, or None if it was dropped.
         """
+        if self._max_pending_tasks and len(self._tasks) >= self._max_pending_tasks:
+            self._record_drop(name)
+            # Close the coroutine we are not going to await, otherwise Python
+            # emits a "coroutine was never awaited" RuntimeWarning.
+            coro.close()
+            return None
+
         metrics.counter("background_task_manager.tasks_created").inc()
 
         task = asyncio.create_task(coro, name=name)

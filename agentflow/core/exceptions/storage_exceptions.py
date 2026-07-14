@@ -168,6 +168,40 @@ class SchemaVersionError(StorageError):
         super().__init__(message, error_code, context)
 
 
+class StaleStateError(StorageError):
+    """Raised when a durable state write loses an optimistic-concurrency check.
+
+    The writer based its update on a state version that is no longer current,
+    which means another execution committed a newer state for the same thread
+    in the meantime. Committing anyway would silently discard that other
+    execution's work (a lost update), so the write is rejected instead.
+
+    Callers (e.g. an API layer) should treat this as a conflict (HTTP 409):
+    reload the latest state and retry, rather than overwrite blindly.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "STORAGE_CONFLICT_000",
+        context: dict[str, Any] | None = None,
+    ):
+        """Initialize a StaleStateError.
+
+        Args:
+            message (str): Description of the concurrency conflict.
+            error_code (str): Unique error code (default: "STORAGE_CONFLICT_000")
+            context (dict): Additional contextual information (default: None)
+        """
+        logger.warning(
+            "StaleStateError [%s]: %s | Context: %s",
+            error_code,
+            message,
+            context or {},
+        )
+        super().__init__(message, error_code, context)
+
+
 class ResourceNotFoundError(StorageError):
     """Raised when a requested resource is not found in storage.
 

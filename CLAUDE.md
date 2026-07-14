@@ -5,7 +5,8 @@ lives in this folder). For the API/CLI, TS client, docs, or playground, see the 
 their respective folders and the workspace-root `CLAUDE.md` for the monorepo overview.
 
 - Package name (PyPI): `10xscale-agentflow`
-- Version: `0.7.5.1` (single source of truth: `pyproject.toml`)
+- Version: `0.8.0` (single source of truth: `pyproject.toml`; `agentflow.__version__`
+  resolves from installed distribution metadata, so it cannot drift from this file)
 - Requires: Python >= 3.12
 - Importable top-level package lives at `agentflow/agentflow/` (this folder is the repo root;
   the importable package is the nested `agentflow/` directory).
