@@ -16,3 +16,9 @@ The script prints the available tool names. Use the same `ToolNode` as an
 agent's `tool_node` when building a graph. See the
 [Xquik MCP overview](https://docs.xquik.com/mcp/overview) for authentication,
 tool behavior, and safety requirements.
+
+This API-key example sends the `x-api-key` header. Xquik also supports OAuth
+2.1 for compatible MCP clients.
+
+Xquik is an independent third-party service. Not affiliated with X Corp.
+"Twitter" and "X" are trademarks of X Corp.

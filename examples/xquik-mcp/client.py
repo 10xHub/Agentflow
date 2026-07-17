@@ -13,7 +13,7 @@ MCP_URL = "https://xquik.com/mcp"
 
 def require_api_key() -> str:
     """Read the Xquik API key without embedding it in source."""
-    api_key = os.getenv("XQUIK_API_KEY")
+    api_key = os.getenv("XQUIK_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("Set XQUIK_API_KEY before running this example")
     return api_key
@@ -27,7 +27,7 @@ def build_client(api_key: str) -> Client:
                 "xquik": {
                     "url": MCP_URL,
                     "transport": "streamable-http",
-                    "headers": {"Authorization": f"Bearer {api_key}"},
+                    "headers": {"x-api-key": api_key},
                 }
             }
         }
