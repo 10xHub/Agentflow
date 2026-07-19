@@ -43,7 +43,7 @@ main_agent = Agent(
             """,
         },
     ],
-    tools=tool_node,
+    tool_node=tool_node,
     trim_context=True,
 )
 
