@@ -1,6 +1,6 @@
 [project]
 name = "10xscale-agentflow"
-version = "0.8.0"
+version = "1.0.0"
 description = "Production-grade Python framework for building, orchestrating, and deploying multi-agent LLM systems. A simpler, batteries-included alternative to LangGraph, CrewAI, and AutoGen with graph-based workflows, durable state, native MCP support, and provider-agnostic LLM integration (OpenAI, Google GenAI, Anthropic)."
 readme = "README.md"
 keywords = [
@@ -86,7 +86,7 @@ classifiers = [
     # this package is still 0.x with a pre-1.0 DI dependency. Claiming
     # Production/Stable while shipping 0.x minor versions that may break the API sets
     # an expectation the versioning scheme does not back. Move to 5 at 1.0.
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]

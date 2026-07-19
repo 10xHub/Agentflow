@@ -3,8 +3,9 @@
 All notable changes to `10xscale-agentflow` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This project uses [Semantic Versioning](https://semver.org/), with the caveat that
-while the version is `0.x`, a **minor** bump may contain breaking changes.
+This project uses [Semantic Versioning](https://semver.org/). From `1.0.0` on, the
+public API is stable: breaking changes bump the **major** version and follow the
+deprecation policy below.
 
 ## Deprecation policy
 
@@ -23,10 +24,17 @@ Starting from this release:
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-19
+
+First stable release. The public API is now covered by the deprecation policy above,
+and the package is classified `Development Status :: 5 - Production/Stable`. This
+release is the production-hardening round on top of `0.8.0`: durable state gets
+optimistic concurrency and an idempotent tool ledger, execution is bounded by real
+timeouts and cancellation, and per-user isolation is enforced across the storage
+layer.
+
 ### Breaking
 
-- **`Development Status` is now `4 - Beta`** (was `5 - Production/Stable`). No code
-  change; the classifier now matches reality and the sibling API package.
 - **`injectq` is pinned to `>=0.4.0,<0.5`.** It is pre-1.0, so a `0.5` release may
   break the API; without an upper bound it would have been picked up automatically
   and broken fresh installs.
