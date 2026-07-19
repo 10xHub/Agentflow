@@ -387,3 +387,32 @@ class TestAsyncRelease:
         listed = await cp.alist_messages(config_t1)
         assert listed == []
         assert await cp.aget_thread(config_t1) is None
+
+
+# ---------------------------------------------------------------------------
+# aget_thread_owner — global ownership resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aget_thread_owner_returns_owner_when_registered(cp):
+    cfg = {"thread_id": "t-own", "user_id": "alice"}
+    await cp.aput_thread(cfg, ThreadInfo(thread_id="t-own", user_id="alice"))
+    assert await cp.aget_thread_owner("t-own") == "alice"
+
+
+@pytest.mark.asyncio
+async def test_aget_thread_owner_none_for_unknown_thread(cp):
+    assert await cp.aget_thread_owner("ghost") is None
+
+
+@pytest.mark.asyncio
+async def test_base_default_raises_not_implemented():
+    """A backend that does not override the hook must fail loud, never silently
+    report 'no owner' (which would defeat owner-based authorization)."""
+    from agentflow.storage.checkpointer.base_checkpointer import BaseCheckpointer
+
+    # Bypass ABC instantiation guard to exercise the concrete default body directly.
+    inst = object.__new__(InMemoryCheckpointer)
+    with pytest.raises(NotImplementedError):
+        await BaseCheckpointer.aget_thread_owner(inst, "x")

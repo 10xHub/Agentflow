@@ -611,6 +611,23 @@ class BaseCheckpointer[StateT: AgentState](ABC):
         """
         raise NotImplementedError
 
+    async def aget_thread_owner(self, thread_id: str | int) -> str | int | None:
+        """Return the ``user_id`` that owns ``thread_id``, regardless of caller.
+
+        Unlike :meth:`aget_thread` (which is owner-scoped), this resolves ownership
+        globally so an authorization layer can decide whether a *different* user may
+        act on a thread. It exists to answer three states:
+
+        - returns the owner's ``user_id`` -> the thread exists and is owned by them;
+        - returns ``None`` -> the thread does not exist yet (a brand-new session);
+        - raises :class:`NotImplementedError` -> this backend cannot resolve ownership.
+
+        The default raises so a backend cannot silently report "no owner" for every
+        thread (which would defeat owner-based authorization). Concrete backends that
+        persist a thread registry override this.
+        """
+        raise NotImplementedError
+
     # -------------------------
     # Thread methods sync
     # -------------------------

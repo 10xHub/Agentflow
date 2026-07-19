@@ -644,9 +644,7 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
                         # pg_type_typname_nsp_index", which the DO-block's
                         # duplicate_object guard does not catch. The advisory lock
                         # is released automatically when the transaction ends.
-                        await conn.execute(
-                            "SELECT pg_advisory_xact_lock($1)", SCHEMA_INIT_LOCK_ID
-                        )
+                        await conn.execute("SELECT pg_advisory_xact_lock($1)", SCHEMA_INIT_LOCK_ID)
 
                         sql_statements = self._build_create_tables_sql()
                         for sql in sql_statements:
@@ -1307,7 +1305,6 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Retrieving state for thread_id=%s, user_id=%s", thread_id, user_id)
 
         try:
-
             scope_sql, scope_params = self._thread_scope(thread_id, user_id)
 
             async def _get_state():
@@ -1456,9 +1453,7 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
             await self.redis.delete(self._get_thread_key(thread_id, user_id))
             logger.debug("Invalidated stale state cache for thread_id=%s", thread_id)
         except Exception as e:  # invalidation is best-effort
-            logger.warning(
-                "Failed to invalidate state cache for thread_id=%s: %s", thread_id, e
-            )
+            logger.warning("Failed to invalidate state cache for thread_id=%s: %s", thread_id, e)
 
     async def aget_state_cache(self, config: dict[str, Any]) -> StateT | None:
         """
@@ -2174,7 +2169,6 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Retrieving thread info for thread_id=%s, user_id=%s", thread_id, user_id)
 
         try:
-
             # Owner-scoped unless the developer disabled isolation.
             if self._isolation_active(user_id):
                 where, params = "thread_id = $1 AND user_id = $2", [thread_id, user_id]
@@ -2215,6 +2209,29 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         except Exception as e:
             logger.error("Failed to retrieve thread info for thread_id=%s: %s", thread_id, e)
             raise e
+
+    async def aget_thread_owner(self, thread_id: str | int) -> str | int | None:
+        """Return the ``user_id`` that owns ``thread_id`` (global, not owner-scoped).
+
+        Resolves ownership across all users so an authorization layer can reject a
+        different user acting on the thread. Returns None if no such thread exists.
+        """
+
+        async def _get_owner():
+            async with (await self._get_pg_pool()).acquire() as conn:
+                return await conn.fetchval(
+                    f"""
+                    SELECT user_id
+                    FROM {self._get_table_name("threads")}
+                    WHERE thread_id = $1
+                    """,  # noqa: S608
+                    thread_id,
+                )
+
+        return await self._retry_on_connection_error(
+            _get_owner,
+            max_retries=3,
+        )
 
     async def alist_threads(
         self,

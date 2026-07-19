@@ -370,3 +370,11 @@ def test_missing_aiosqlite_raises(monkeypatch):
     )
     with pytest.raises(ImportError, match="aiosqlite"):
         SqliteCheckpointer(":memory:")
+
+
+@pytest.mark.asyncio
+async def test_aget_thread_owner_sqlite(cp):
+    cfg = {"thread_id": "t-own", "user_id": "alice"}
+    await cp.aput_thread(cfg, ThreadInfo(thread_id="t-own", user_id="alice"))
+    assert await cp.aget_thread_owner("t-own") == "alice"
+    assert await cp.aget_thread_owner("nope") is None

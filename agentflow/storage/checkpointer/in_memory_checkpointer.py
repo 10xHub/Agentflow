@@ -440,6 +440,20 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
             logger.debug(f"Stored thread info for key: {key}")
             return True
 
+    async def aget_thread_owner(self, thread_id: str | int) -> str | int | None:
+        """Return the owner ``user_id`` of ``thread_id``, or None if unknown.
+
+        Threads are keyed by ``thread_id`` here, so the stored record's ``user_id``
+        is the owner. Note the in-memory registry is only populated by explicit
+        ``aput_thread`` calls; a thread that only ever had state written is not
+        recorded, so this returns None for it.
+        """
+        async with self._threads_lock:
+            record = self._threads.get(str(thread_id))
+        if not record:
+            return None
+        return record.get("user_id")
+
     async def aget_thread(
         self,
         config: dict[str, Any],

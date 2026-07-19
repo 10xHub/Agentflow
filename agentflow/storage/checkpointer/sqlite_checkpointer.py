@@ -508,6 +508,18 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
             return None
         return ThreadInfo.model_validate(json.loads(row["thread_data"]))
 
+    async def aget_thread_owner(self, thread_id: str | int) -> str | int | None:
+        """Return the owning ``user_id`` for ``thread_id`` (global, not owner-scoped)."""
+        await self._ensure_setup()
+        conn = await self._get_conn()
+        async with conn.execute(
+            "SELECT thread_data FROM af_threads WHERE thread_id = ?", (str(thread_id),)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return json.loads(row["thread_data"]).get("user_id")
+
     async def alist_threads(
         self,
         config: dict[str, Any],
