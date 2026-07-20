@@ -839,6 +839,93 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
             raise last_exception
         return None
 
+    async def _run_query(self, fn, *, in_transaction: bool = False):
+        """Acquire a pooled connection, run ``fn(conn)``, retrying on conn errors.
+
+        Collapses the ``acquire() as conn`` + ``_retry_on_connection_error``
+        boilerplate that every query method previously repeated. When
+        ``in_transaction`` is True the callback runs inside ``conn.transaction()``
+        so a multi-statement write commits atomically; a connection error retries
+        the whole callback on a fresh connection (``max_retries=3``, matching the
+        previous per-method wrapping).
+
+        Args:
+            fn: Coroutine function taking a single ``conn`` argument.
+            in_transaction: Wrap the callback in a database transaction.
+
+        Returns:
+            Whatever ``fn`` returns.
+        """
+
+        async def _operation():
+            async with (await self._get_pg_pool()).acquire() as conn:
+                if in_transaction:
+                    async with conn.transaction():
+                        return await fn(conn)
+                return await fn(conn)
+
+        return await self._retry_on_connection_error(_operation, max_retries=3)
+
+    @staticmethod
+    def _loads_jsonb(value: Any) -> Any:
+        """Normalize a JSONB column to a Python object.
+
+        asyncpg may hand back a JSONB column either already decoded (dict/list)
+        or as raw ``str``/``bytes`` depending on codec configuration. This coerces
+        both shapes to the decoded value, replacing the ad-hoc
+        ``json.loads(x) if isinstance(x, ...) else x`` guards scattered through
+        the row-mapping code.
+        """
+        if isinstance(value, str | bytes | bytearray):
+            return json.loads(value)
+        return value
+
+    def _thread_row_scope(
+        self,
+        thread_id: str | int,
+        user_id: str | int | None,
+        config: dict[str, Any] | None,
+    ) -> tuple[str, list[Any]]:
+        """Build the WHERE fragment + params for a direct ``threads`` row lookup.
+
+        Unlike :meth:`_thread_scope` (which scopes ``states``/``messages`` through
+        a subquery), this keys straight off the ``threads`` table's own ``user_id``
+        column. Shared by the thread read/delete paths.
+        """
+        if self._isolation_active(user_id, config):
+            return "thread_id = $1 AND user_id = $2", [thread_id, user_id]
+        return "thread_id = $1", [thread_id]
+
+    def _append_owner_scope(
+        self,
+        query: str,
+        params: list[Any],
+        user_id: str | int | None,
+        config: dict[str, Any] | None,
+    ) -> str:
+        """Append the thread-ownership filter to a ``messages`` query when active.
+
+        Mutates ``params`` in place (appending ``user_id``) and returns the query
+        with the extra ``AND thread_id IN (...)`` clause. A no-op when isolation is
+        off, so a single-tenant caller does not pay for the join.
+        """
+        if self._isolation_active(user_id, config):
+            params.append(user_id)
+            query += f" AND {self._thread_owned_by_sql(len(params))}"
+        return query
+
+    def _row_to_thread_info(self, row) -> ThreadInfo:
+        """Build a :class:`ThreadInfo` from a ``threads`` row."""
+        meta_dict = self._loads_jsonb(row["meta"]) if row["meta"] else {}
+        return ThreadInfo(
+            thread_id=row["thread_id"],
+            thread_name=row["thread_name"],
+            user_id=row["user_id"],
+            metadata=meta_dict,
+            run_id=meta_dict.get("run_id"),
+            updated_at=row["updated_at"],
+        )
+
     async def _ensure_thread_exists(
         self,
         thread_id: str | int,
@@ -861,48 +948,47 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         """
         try:
 
-            async def _check_and_create_thread():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    # Insert-if-absent, then verify ownership from what is actually
-                    # in the table. Checking existence with (thread_id AND user_id)
-                    # first was unsafe: for a thread owned by ANOTHER user the
-                    # lookup missed, the INSERT silently no-opped on conflict, and
-                    # the caller went on to write into that user's thread.
-                    # Reading the owner back after the insert is also race-safe:
-                    # if a concurrent request created the thread, we observe the
-                    # winner's user_id rather than assuming we created it.
-                    await conn.execute(
-                        f"""
-                        INSERT INTO {self._get_table_name("threads")}
-                            (thread_id, thread_name, user_id, meta)
-                        VALUES ($1, $2, $3, $4)
-                        ON CONFLICT DO NOTHING
-                        """,  # noqa: S608
-                        thread_id,
-                        config.get("thread_name", f"Thread {thread_id}"),
-                        user_id,
-                        json.dumps(config.get("thread_meta", {})),
+            async def _check_and_create_thread(conn):
+                # Insert-if-absent, then verify ownership from what is actually
+                # in the table. Checking existence with (thread_id AND user_id)
+                # first was unsafe: for a thread owned by ANOTHER user the
+                # lookup missed, the INSERT silently no-opped on conflict, and
+                # the caller went on to write into that user's thread.
+                # Reading the owner back after the insert is also race-safe:
+                # if a concurrent request created the thread, we observe the
+                # winner's user_id rather than assuming we created it.
+                await conn.execute(
+                    f"""
+                    INSERT INTO {self._get_table_name("threads")}
+                        (thread_id, thread_name, user_id, meta)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT DO NOTHING
+                    """,  # noqa: S608
+                    thread_id,
+                    config.get("thread_name", f"Thread {thread_id}"),
+                    user_id,
+                    json.dumps(config.get("thread_meta", {})),
+                )
+
+                owner = await conn.fetchval(
+                    f"SELECT user_id FROM {self._get_table_name('threads')} "  # noqa: S608
+                    f"WHERE thread_id = $1",
+                    thread_id,
+                )
+                if owner is None:
+                    raise StorageError(
+                        message="Thread could not be created",
+                        error_code="STORAGE_002",
+                        context={"thread_id": thread_id},
+                    )
+                if self._isolation_active(user_id, config) and str(owner) != str(user_id):
+                    raise StorageError(
+                        message="Thread is owned by a different user",
+                        error_code="STORAGE_FORBIDDEN_001",
+                        context={"thread_id": thread_id},
                     )
 
-                    owner = await conn.fetchval(
-                        f"SELECT user_id FROM {self._get_table_name('threads')} "  # noqa: S608
-                        f"WHERE thread_id = $1",
-                        thread_id,
-                    )
-                    if owner is None:
-                        raise StorageError(
-                            message="Thread could not be created",
-                            error_code="STORAGE_002",
-                            context={"thread_id": thread_id},
-                        )
-                    if self._isolation_active(user_id) and str(owner) != str(user_id):
-                        raise StorageError(
-                            message="Thread is owned by a different user",
-                            error_code="STORAGE_FORBIDDEN_001",
-                            context={"thread_id": thread_id},
-                        )
-
-            await self._retry_on_connection_error(_check_and_create_thread, max_retries=3)
+            await self._run_query(_check_and_create_thread)
 
         except Exception as e:
             logger.error("Failed to ensure thread exists: %s", e)
@@ -959,20 +1045,20 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         self,
         thread_id: str | int,
         user_id: str | int | None,
+        config: dict[str, Any] | None = None,
     ) -> tuple[str, list[Any]]:
         """Build the WHERE fragment + params selecting a thread's rows.
 
         ``states``/``messages`` carry a ``thread_id`` but no ``user_id`` of their
-        own; ownership lives on ``threads``. When ``enforce_user_isolation`` is on
-        (the default) we scope through the parent table, so a caller can only
-        touch threads they own. When the developer has turned isolation off (or
-        no ``user_id`` is available), we key on ``thread_id`` alone and skip the
-        join entirely.
+        own; ownership lives on ``threads``. When isolation is active (per the request
+        policy, or ``enforce_user_isolation`` when there is no policy) we scope through the
+        parent table, so a caller can only touch threads they own. Otherwise we key on
+        ``thread_id`` alone and skip the join entirely.
 
         Returns:
             tuple[str, list]: SQL fragment using $1..$n, and the matching params.
         """
-        if self._isolation_active(user_id):
+        if self._isolation_active(user_id, config):
             return (
                 f"thread_id = $1 AND thread_id IN "
                 f"(SELECT thread_id FROM {self._get_table_name('threads')} "
@@ -981,14 +1067,17 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
             )
         return ("thread_id = $1", [thread_id])
 
-    def _isolation_active(self, user_id: str | int | None) -> bool:
+    def _isolation_active(
+        self, user_id: str | int | None, config: dict[str, Any] | None = None
+    ) -> bool:
         """Whether ownership scoping should be applied for this call.
 
-        Requires both that the developer left isolation enabled and that an actual
-        ``user_id`` is present to scope by. Scoping on a missing user_id would
-        silently match nothing, which is worse than not scoping at all.
+        Driven by the trusted ``config["authz"]`` policy when present, falling back to this
+        checkpointer's ``enforce_user_isolation`` setting otherwise (so ``config`` is
+        optional and a caller that omits it keeps the historical behaviour). Scoping still
+        requires an actual ``user_id`` -- scoping on a missing one would match nothing.
         """
-        return bool(self.enforce_user_isolation and user_id)
+        return self._isolation_enabled(config, user_id)
 
     def _thread_owned_by_sql(self, user_param: int) -> str:
         """Return a SQL fragment requiring the row's thread to belong to a user.
@@ -1050,7 +1139,7 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
                 error_code="STORAGE_002",
                 context={"thread_id": thread_id},
             )
-        if self._isolation_active(user_id) and str(owner_row["user_id"]) != str(user_id):
+        if self._isolation_active(user_id, config) and str(owner_row["user_id"]) != str(user_id):
             raise StorageError(
                 message="Thread is owned by a different user",
                 error_code="STORAGE_FORBIDDEN_001",
@@ -1163,13 +1252,12 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         with metrics.timer("pg_checkpointer.save_state.duration"):
             try:
 
-                async def _store_state():
-                    async with (await self._get_pg_pool()).acquire() as conn, conn.transaction():
-                        return await self._write_state_row(
-                            conn, thread_id, user_id, state, config, expected_version
-                        )
+                async def _store_state(conn):
+                    return await self._write_state_row(
+                        conn, thread_id, user_id, state, config, expected_version
+                    )
 
-                new_version = await self._retry_on_connection_error(_store_state, max_retries=3)
+                new_version = await self._run_query(_store_state, in_transaction=True)
                 config[STATE_VERSION_CONFIG_KEY] = new_version
                 logger.debug("State stored for thread_id=%s at version=%s", thread_id, new_version)
                 metrics.counter("pg_checkpointer.save_state.success").inc()
@@ -1244,18 +1332,15 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         with metrics.timer("pg_checkpointer.save_checkpoint.duration"):
             try:
 
-                async def _store_checkpoint():
-                    async with (await self._get_pg_pool()).acquire() as conn, conn.transaction():
-                        version = await self._write_state_row(
-                            conn, thread_id, user_id, state, config, expected_version
-                        )
-                        if messages:
-                            await self._insert_messages(conn, thread_id, messages, metadata)
-                        return version
+                async def _store_checkpoint(conn):
+                    version = await self._write_state_row(
+                        conn, thread_id, user_id, state, config, expected_version
+                    )
+                    if messages:
+                        await self._insert_messages(conn, thread_id, messages, metadata)
+                    return version
 
-                new_version = await self._retry_on_connection_error(
-                    _store_checkpoint, max_retries=3
-                )
+                new_version = await self._run_query(_store_checkpoint, in_transaction=True)
                 config[STATE_VERSION_CONFIG_KEY] = new_version
                 logger.debug(
                     "Checkpoint stored for thread_id=%s at version=%s (%d messages)",
@@ -1305,21 +1390,15 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Retrieving state for thread_id=%s, user_id=%s", thread_id, user_id)
 
         try:
-            scope_sql, scope_params = self._thread_scope(thread_id, user_id)
+            scope_sql, scope_params = self._thread_scope(thread_id, user_id, config)
+            query = f"""
+                SELECT version, state_data FROM {self._get_table_name("states")}
+                WHERE {scope_sql}
+                ORDER BY version DESC, state_id DESC
+                LIMIT 1
+                """  # noqa: S608
 
-            async def _get_state():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    return await conn.fetchrow(
-                        f"""
-                        SELECT version, state_data FROM {self._get_table_name("states")}
-                        WHERE {scope_sql}
-                        ORDER BY version DESC, state_id DESC
-                        LIMIT 1
-                        """,  # noqa: S608
-                        *scope_params,
-                    )
-
-            row = await self._retry_on_connection_error(_get_state, max_retries=3)
+            row = await self._run_query(lambda conn: conn.fetchrow(query, *scope_params))
 
             if row:
                 data = json.loads(row["state_data"])
@@ -1354,18 +1433,11 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Clearing state for thread_id=%s, user_id=%s", thread_id, user_id)
 
         try:
-            scope_sql, scope_params = self._thread_scope(thread_id, user_id)
+            scope_sql, scope_params = self._thread_scope(thread_id, user_id, config)
 
             # Clear from PostgreSQL with retry logic, scoped to the owner.
-            async def _clear_state():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    await conn.execute(
-                        f"DELETE FROM {self._get_table_name('states')} "  # noqa: S608
-                        f"WHERE {scope_sql}",
-                        *scope_params,
-                    )
-
-            await self._retry_on_connection_error(_clear_state, max_retries=3)
+            query = f"DELETE FROM {self._get_table_name('states')} WHERE {scope_sql}"  # noqa: S608
+            await self._run_query(lambda conn: conn.execute(query, *scope_params))
 
             # Clear from Redis cache
             cache_key = self._get_thread_key(thread_id, user_id)
@@ -1599,22 +1671,17 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         thread_id, _ = self._validate_config(config)
 
         try:
-
-            async def _get():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    return await conn.fetchrow(
-                        f"SELECT result FROM {self._get_table_name('tool_executions')} "  # noqa: S608
-                        f"WHERE thread_id = $1 AND tool_call_id = $2",
-                        thread_id,
-                        str(tool_call_id),
-                    )
-
-            row = await self._retry_on_connection_error(_get, max_retries=3)
+            query = (
+                f"SELECT result FROM {self._get_table_name('tool_executions')} "  # noqa: S608
+                f"WHERE thread_id = $1 AND tool_call_id = $2"
+            )
+            row = await self._run_query(
+                lambda conn: conn.fetchrow(query, thread_id, str(tool_call_id))
+            )
             if not row:
                 return None
 
-            raw = row["result"]
-            return json.loads(raw) if isinstance(raw, str | bytes | bytearray) else raw
+            return self._loads_jsonb(row["result"])
 
         except Exception as e:
             # A ledger read failure must not take the run down. Falling back to
@@ -1648,21 +1715,15 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
 
         await self._ensure_thread_exists(thread_id, user_id, config)
 
-        async def _put():
-            async with (await self._get_pg_pool()).acquire() as conn:
-                await conn.execute(
-                    f"""
-                    INSERT INTO {self._get_table_name("tool_executions")}
-                        (thread_id, tool_call_id, result)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (thread_id, tool_call_id) DO NOTHING
-                    """,  # noqa: S608
-                    thread_id,
-                    str(tool_call_id),
-                    json.dumps(result),
-                )
-
-        await self._retry_on_connection_error(_put, max_retries=3)
+        query = f"""
+            INSERT INTO {self._get_table_name("tool_executions")}
+                (thread_id, tool_call_id, result)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (thread_id, tool_call_id) DO NOTHING
+            """  # noqa: S608
+        await self._run_query(
+            lambda conn: conn.execute(query, thread_id, str(tool_call_id), json.dumps(result))
+        )
         logger.debug(
             "Recorded tool execution thread_id=%s tool_call_id=%s", thread_id, tool_call_id
         )
@@ -1744,11 +1805,10 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
             await self._ensure_thread_exists(thread_id, user_id, config)
 
             # Store messages in batch with retry logic
-            async def _store_messages():
-                async with (await self._get_pg_pool()).acquire() as conn, conn.transaction():
-                    await self._insert_messages(conn, thread_id, messages, metadata)
-
-            await self._retry_on_connection_error(_store_messages, max_retries=3)
+            await self._run_query(
+                lambda conn: self._insert_messages(conn, thread_id, messages, metadata),
+                in_transaction=True,
+            )
             logger.debug("Stored %d messages for thread_id=%s", len(messages), thread_id)
 
         except Exception as e:
@@ -1775,28 +1835,22 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Retrieving message_id=%s for thread_id=%s", message_id, thread_id)
 
         try:
+            query = f"""
+                SELECT message_id, thread_id, role, content, tool_calls,
+                       tool_call_id, reasoning, created_at, total_tokens,
+                       usages, meta
+                FROM {self._get_table_name("messages")}
+                WHERE message_id = $1
+            """  # noqa: S608
+            params: list[Any] = [message_id]
+            if thread_id:
+                params.append(thread_id)
+                query += f" AND thread_id = ${len(params)}"
+            # Owner scoping: a caller may only read messages on threads they own,
+            # even if they know the message/thread id.
+            query = self._append_owner_scope(query, params, user_id, config)
 
-            async def _get_message():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    query = f"""
-                        SELECT message_id, thread_id, role, content, tool_calls,
-                               tool_call_id, reasoning, created_at, total_tokens,
-                               usages, meta
-                        FROM {self._get_table_name("messages")}
-                        WHERE message_id = $1
-                    """  # noqa: S608
-                    params: list[Any] = [message_id]
-                    if thread_id:
-                        params.append(thread_id)
-                        query += f" AND thread_id = ${len(params)}"
-                    # Owner scoping: a caller may only read messages on threads
-                    # they own, even if they know the message/thread id.
-                    if self._isolation_active(user_id):
-                        params.append(user_id)
-                        query += f" AND {self._thread_owned_by_sql(len(params))}"
-                    return await conn.fetchrow(query, *params)
-
-            row = await self._retry_on_connection_error(_get_message, max_retries=3)
+            row = await self._run_query(lambda conn: conn.fetchrow(query, *params))
 
             if not row:
                 raise ValueError(f"Message not found: {message_id}")
@@ -1838,46 +1892,34 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Listing messages for thread_id=%s", thread_id)
 
         try:
+            # Build query with optional search
+            query = f"""
+                SELECT message_id, thread_id, role, content, tool_calls,
+                       tool_call_id, reasoning, created_at, total_tokens,
+                       usages, meta
+                FROM {self._get_table_name("messages")}
+                WHERE thread_id = $1
+            """  # noqa: S608
+            params: list[Any] = [thread_id]
 
-            async def _list_messages():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    # Build query with optional search
-                    query = f"""
-                        SELECT message_id, thread_id, role, content, tool_calls,
-                               tool_call_id, reasoning, created_at, total_tokens,
-                               usages, meta
-                        FROM {self._get_table_name("messages")}
-                        WHERE thread_id = $1
-                    """  # noqa: S608
-                    params = [thread_id]
-                    param_count = 1
+            # Owner scoping: listing a thread you do not own returns nothing.
+            query = self._append_owner_scope(query, params, user_id, config)
 
-                    # Owner scoping: listing a thread you do not own returns nothing.
-                    if self._isolation_active(user_id):
-                        param_count += 1
-                        params.append(user_id)
-                        query += f" AND {self._thread_owned_by_sql(param_count)}"
+            if search:
+                params.append(f"%{search}%")
+                query += f" AND content ILIKE ${len(params)}"
 
-                    if search:
-                        param_count += 1
-                        query += f" AND content ILIKE ${param_count}"
-                        params.append(f"%{search}%")
+            query += " ORDER BY created_at ASC"
 
-                    query += " ORDER BY created_at ASC"
+            if limit:
+                params.append(limit)
+                query += f" LIMIT ${len(params)}"
 
-                    if limit:
-                        param_count += 1
-                        query += f" LIMIT ${param_count}"
-                        params.append(limit)
+            if offset:
+                params.append(offset)
+                query += f" OFFSET ${len(params)}"
 
-                    if offset:
-                        param_count += 1
-                        query += f" OFFSET ${param_count}"
-                        params.append(offset)
-
-                    return await conn.fetch(query, *params)
-
-            rows = await self._retry_on_connection_error(_list_messages, max_retries=3)
+            rows = await self._run_query(lambda conn: conn.fetch(query, *params))
             if not rows:
                 rows = []
             messages = [self._row_to_message(row) for row in rows]
@@ -1913,25 +1955,19 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Deleting message_id=%s for thread_id=%s", message_id, thread_id)
 
         try:
+            query = (
+                f"DELETE FROM {self._get_table_name('messages')} "  # noqa: S608
+                f"WHERE message_id = $1"
+            )
+            params: list[Any] = [message_id]
+            if thread_id:
+                params.append(thread_id)
+                query += f" AND thread_id = ${len(params)}"
+            # Owner scoping: never let a caller delete a message on a thread they
+            # do not own, even with a known message_id.
+            query = self._append_owner_scope(query, params, user_id, config)
 
-            async def _delete_message():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    query = (
-                        f"DELETE FROM {self._get_table_name('messages')} "  # noqa: S608
-                        f"WHERE message_id = $1"
-                    )
-                    params: list[Any] = [message_id]
-                    if thread_id:
-                        params.append(thread_id)
-                        query += f" AND thread_id = ${len(params)}"
-                    # Owner scoping: never let a caller delete a message on a
-                    # thread they do not own, even with a known message_id.
-                    if self._isolation_active(user_id):
-                        params.append(user_id)
-                        query += f" AND {self._thread_owned_by_sql(len(params))}"
-                    await conn.execute(query, *params)
-
-            await self._retry_on_connection_error(_delete_message, max_retries=3)
+            await self._run_query(lambda conn: conn.execute(query, *params))
             logger.debug("Deleted message_id=%s", message_id)
             return None
 
@@ -1953,45 +1989,27 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
 
         # Handle usages JSONB
         usages = None
-        usages_raw = row["usages"]
-        if usages_raw:
+        if row["usages"]:
             try:
-                usages_dict = (
-                    json.loads(usages_raw)
-                    if isinstance(usages_raw, str | bytes | bytearray)
-                    else usages_raw
-                )
-                usages = TokenUsages(**usages_dict)
+                usages = TokenUsages(**self._loads_jsonb(row["usages"]))
             except Exception:
                 usages = None
 
         # Handle tool_calls JSONB
-        tool_calls_raw = row["tool_calls"]
-        if tool_calls_raw:
+        tool_calls = None
+        if row["tool_calls"]:
             try:
-                tool_calls = (
-                    json.loads(tool_calls_raw)
-                    if isinstance(tool_calls_raw, str | bytes | bytearray)
-                    else tool_calls_raw
-                )
+                tool_calls = self._loads_jsonb(row["tool_calls"])
             except Exception:
                 tool_calls = None
-        else:
-            tool_calls = None
 
         # Handle meta JSONB
-        meta_raw = row["meta"]
-        if meta_raw:
+        metadata = {}
+        if row["meta"]:
             try:
-                metadata = (
-                    json.loads(meta_raw)
-                    if isinstance(meta_raw, str | bytes | bytearray)
-                    else meta_raw
-                )
+                metadata = self._loads_jsonb(row["meta"])
             except Exception:
                 metadata = {}
-        else:
-            metadata = {}
 
         # Handle content TEXT/JSONB -> list of blocks
         content_raw = row["content"]
@@ -2079,67 +2097,66 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
                 }
             )
 
-            async def _put_thread():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    # Try to insert; if inserted, RETURNING will return the row
-                    row = await conn.fetchrow(
-                        f"""
-                        INSERT INTO {self._get_table_name("threads")}
-                            (thread_id, thread_name, user_id, meta)
-                        VALUES ($1, $2, $3, $4)
-                        ON CONFLICT (thread_id) DO NOTHING
-                        RETURNING thread_id
-                        """,  # noqa: S608
-                        thread_id,
-                        thread_name,
-                        user_id,
-                        json.dumps(meta),
+            async def _put_thread(conn):
+                # Try to insert; if inserted, RETURNING will return the row
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO {self._get_table_name("threads")}
+                        (thread_id, thread_name, user_id, meta)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (thread_id) DO NOTHING
+                    RETURNING thread_id
+                    """,  # noqa: S608
+                    thread_id,
+                    thread_name,
+                    user_id,
+                    json.dumps(meta),
+                )
+
+                if row:
+                    # Insert succeeded
+                    return True
+
+                # Insert did nothing (conflict) -> update the existing row.
+                # When isolation is on, the UPDATE is scoped by user_id too:
+                # without that, any caller could rename or re-tag another
+                # user's thread. RETURNING lets us detect that case.
+                # Only set thread_name when a non-None value is provided.
+                scoped = self._isolation_active(user_id, config)
+
+                if thread_name is None:
+                    sets, params = "meta = $1, updated_at = NOW()", [json.dumps(meta)]
+                else:
+                    sets = "thread_name = $1, meta = $2, updated_at = NOW()"
+                    params = [thread_name, json.dumps(meta)]
+
+                params.append(thread_id)
+                where = f"thread_id = ${len(params)}"
+                if scoped:
+                    params.append(user_id)
+                    where += f" AND user_id = ${len(params)}"
+
+                updated = await conn.fetchrow(
+                    f"""
+                    UPDATE {self._get_table_name("threads")}
+                    SET {sets}
+                    WHERE {where}
+                    RETURNING thread_id
+                    """,  # noqa: S608
+                    *params,
+                )
+
+                if updated is None and scoped:
+                    # The thread exists but is owned by someone else.
+                    raise StorageError(
+                        message="Thread is owned by a different user",
+                        error_code="STORAGE_FORBIDDEN_001",
+                        context={"thread_id": thread_id},
                     )
 
-                    if row:
-                        # Insert succeeded
-                        return True
+                return False
 
-                    # Insert did nothing (conflict) -> update the existing row.
-                    # When isolation is on, the UPDATE is scoped by user_id too:
-                    # without that, any caller could rename or re-tag another
-                    # user's thread. RETURNING lets us detect that case.
-                    # Only set thread_name when a non-None value is provided.
-                    scoped = self._isolation_active(user_id)
-
-                    if thread_name is None:
-                        sets, params = "meta = $1, updated_at = NOW()", [json.dumps(meta)]
-                    else:
-                        sets = "thread_name = $1, meta = $2, updated_at = NOW()"
-                        params = [thread_name, json.dumps(meta)]
-
-                    params.append(thread_id)
-                    where = f"thread_id = ${len(params)}"
-                    if scoped:
-                        params.append(user_id)
-                        where += f" AND user_id = ${len(params)}"
-
-                    updated = await conn.fetchrow(
-                        f"""
-                        UPDATE {self._get_table_name("threads")}
-                        SET {sets}
-                        WHERE {where}
-                        RETURNING thread_id
-                        """,  # noqa: S608
-                        *params,
-                    )
-
-                    if updated is None and scoped:
-                        # The thread exists but is owned by someone else.
-                        raise StorageError(
-                            message="Thread is owned by a different user",
-                            error_code="STORAGE_FORBIDDEN_001",
-                            context={"thread_id": thread_id},
-                        )
-
-                    return False
-
-            created = await self._retry_on_connection_error(_put_thread, max_retries=3)
+            created = await self._run_query(_put_thread)
             logger.debug("Thread info stored for thread_id=%s (created=%s)", thread_id, created)
             return bool(created)
 
@@ -2170,37 +2187,24 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
 
         try:
             # Owner-scoped unless the developer disabled isolation.
-            if self._isolation_active(user_id):
-                where, params = "thread_id = $1 AND user_id = $2", [thread_id, user_id]
-            else:
-                where, params = "thread_id = $1", [thread_id]
+            where, params = self._thread_row_scope(thread_id, user_id, config)
+            query = f"""
+                SELECT thread_id, thread_name, user_id, created_at, updated_at, meta
+                FROM {self._get_table_name("threads")}
+                WHERE {where}
+                """  # noqa: S608
 
-            async def _get_thread():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    return await conn.fetchrow(
-                        f"""
-                        SELECT thread_id, thread_name, user_id, created_at, updated_at, meta
-                        FROM {self._get_table_name("threads")}
-                        WHERE {where}
-                        """,  # noqa: S608
-                        *params,
-                    )
-
-            row = await self._retry_on_connection_error(_get_thread, max_retries=3)
+            row = await self._run_query(lambda conn: conn.fetchrow(query, *params))
 
             if row:
-                meta_dict = {}
-                if row["meta"]:
-                    meta_dict = (
-                        json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"]
-                    )
+                meta_dict = self._loads_jsonb(row["meta"]) if row["meta"] else {}
                 return ThreadInfo(
                     thread_id=thread_id,
-                    thread_name=row["thread_name"] if row else None,
+                    thread_name=row["thread_name"],
                     user_id=user_id,
                     metadata=meta_dict,
                     run_id=meta_dict.get("run_id"),
-                    updated_at=row["updated_at"] if row else None,
+                    updated_at=row["updated_at"],
                 )
 
             logger.debug("Thread not found for thread_id=%s, user_id=%s", thread_id, user_id)
@@ -2217,21 +2221,12 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         different user acting on the thread. Returns None if no such thread exists.
         """
 
-        async def _get_owner():
-            async with (await self._get_pg_pool()).acquire() as conn:
-                return await conn.fetchval(
-                    f"""
-                    SELECT user_id
-                    FROM {self._get_table_name("threads")}
-                    WHERE thread_id = $1
-                    """,  # noqa: S608
-                    thread_id,
-                )
-
-        return await self._retry_on_connection_error(
-            _get_owner,
-            max_retries=3,
-        )
+        query = f"""
+            SELECT user_id
+            FROM {self._get_table_name("threads")}
+            WHERE thread_id = $1
+            """  # noqa: S608
+        return await self._run_query(lambda conn: conn.fetchval(query, thread_id))
 
     async def alist_threads(
         self,
@@ -2267,65 +2262,39 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         logger.debug("Listing threads for user_id=%s", user_id)
 
         try:
+            # Build query with optional search. With isolation on, a user only
+            # ever sees their own threads; with it off (single-tenant) the listing
+            # is not restricted by user_id.
+            query = f"""
+                SELECT thread_id, thread_name, user_id, created_at, updated_at, meta
+                FROM {self._get_table_name("threads")}
+                WHERE TRUE
+            """  # noqa: S608
+            params: list[Any] = []
 
-            async def _list_threads():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    # Build query with optional search. With isolation on, a user
-                    # only ever sees their own threads; with it off (single-tenant)
-                    # the listing is not restricted by user_id.
-                    query = f"""
-                        SELECT thread_id, thread_name, user_id, created_at, updated_at, meta
-                        FROM {self._get_table_name("threads")}
-                        WHERE TRUE
-                    """  # noqa: S608
-                    params: list[Any] = []
-                    param_count = 0
+            if self._isolation_active(user_id, config):
+                params.append(user_id)
+                query += f" AND user_id = ${len(params)}"
 
-                    if self._isolation_active(user_id):
-                        param_count += 1
-                        params.append(user_id)
-                        query += f" AND user_id = ${param_count}"
+            if search:
+                params.append(f"%{search}%")
+                query += f" AND thread_name ILIKE ${len(params)}"
 
-                    if search:
-                        param_count += 1
-                        query += f" AND thread_name ILIKE ${param_count}"
-                        params.append(f"%{search}%")
+            query += " ORDER BY updated_at DESC"
 
-                    query += " ORDER BY updated_at DESC"
+            if limit:
+                params.append(limit)
+                query += f" LIMIT ${len(params)}"
 
-                    if limit:
-                        param_count += 1
-                        query += f" LIMIT ${param_count}"
-                        params.append(limit)
+            if offset:
+                params.append(offset)
+                query += f" OFFSET ${len(params)}"
 
-                    if offset:
-                        param_count += 1
-                        query += f" OFFSET ${param_count}"
-                        params.append(offset)
-
-                    return await conn.fetch(query, *params)
-
-            rows = await self._retry_on_connection_error(_list_threads, max_retries=3)
+            rows = await self._run_query(lambda conn: conn.fetch(query, *params))
             if not rows:
                 rows = []
 
-            threads = []
-            for row in rows:
-                meta_dict = {}
-                if row["meta"]:
-                    meta_dict = (
-                        json.loads(row["meta"]) if isinstance(row["meta"], str) else row["meta"]
-                    )
-                threads.append(
-                    ThreadInfo(
-                        thread_id=row["thread_id"],
-                        thread_name=row["thread_name"],
-                        user_id=row["user_id"],
-                        metadata=meta_dict,
-                        run_id=meta_dict.get("run_id"),
-                        updated_at=row["updated_at"],
-                    )
-                )
+            threads = [self._row_to_thread_info(row) for row in rows]
             logger.debug("Found %d threads for user_id=%s", len(threads), user_id)
             return threads
 
@@ -2354,21 +2323,11 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         try:
             # Owner-scoped unless the developer disabled isolation, so one user
             # cannot delete another's thread by id.
-            if self._isolation_active(user_id):
-                where, params = "thread_id = $1 AND user_id = $2", [thread_id, user_id]
-            else:
-                where, params = "thread_id = $1", [thread_id]
+            where, params = self._thread_row_scope(thread_id, user_id, config)
 
             # Delete thread (cascade will handle messages and states) with retry logic
-            async def _clean_thread():
-                async with (await self._get_pg_pool()).acquire() as conn:
-                    await conn.execute(
-                        f"DELETE FROM {self._get_table_name('threads')} "  # noqa: S608
-                        f"WHERE {where}",
-                        *params,
-                    )
-
-            await self._retry_on_connection_error(_clean_thread, max_retries=3)
+            query = f"DELETE FROM {self._get_table_name('threads')} WHERE {where}"  # noqa: S608
+            await self._run_query(lambda conn: conn.execute(query, *params))
 
             # Clean from Redis cache
             cache_key = self._get_thread_key(thread_id, user_id)

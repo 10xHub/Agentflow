@@ -628,6 +628,26 @@ class BaseCheckpointer[StateT: AgentState](ABC):
         """
         raise NotImplementedError
 
+    def _isolation_enabled(self, config: dict[str, Any] | None, user_id: Any) -> bool:
+        """Whether this operation must be scoped to ``user_id``.
+
+        Driven by the trusted ``config["authz"]`` policy (see :mod:`agentflow.core.authz`):
+
+        - ``scope == "owner"`` -> isolate (when a ``user_id`` is present to scope by);
+        - ``scope == "none"``  -> do not isolate (allow_all / single-user);
+        - no policy (e.g. a direct SDK call with no API in front) -> fall back to this
+          backend's own ``enforce_user_isolation`` setting (default off for backends that
+          do not define one).
+        """
+        from agentflow.core.authz import SCOPE_NONE, SCOPE_OWNER, isolation_scope
+
+        scope = isolation_scope(config)
+        if scope == SCOPE_OWNER:
+            return bool(user_id)
+        if scope == SCOPE_NONE:
+            return False
+        return bool(getattr(self, "enforce_user_isolation", False) and user_id)
+
     # -------------------------
     # Thread methods sync
     # -------------------------

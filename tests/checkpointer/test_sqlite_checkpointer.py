@@ -378,3 +378,38 @@ async def test_aget_thread_owner_sqlite(cp):
     await cp.aput_thread(cfg, ThreadInfo(thread_id="t-own", user_id="alice"))
     assert await cp.aget_thread_owner("t-own") == "alice"
     assert await cp.aget_thread_owner("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# Owner-only isolation driven by config["authz"] policy
+# ---------------------------------------------------------------------------
+
+
+def _sqlite_owner_cfg(thread_id, user_id):
+    from agentflow.core.authz import build_authz
+
+    return {"thread_id": thread_id, "user_id": user_id, "authz": build_authz(user_id, scope="owner")}
+
+
+@pytest.mark.asyncio
+async def test_sqlite_owner_only_state(cp):
+    from agentflow.core.exceptions import StorageError
+
+    await cp.aput_state(_sqlite_owner_cfg("t1", "A"), MyState())
+    assert await cp.aget_state(_sqlite_owner_cfg("t1", "B")) is None
+    assert await cp.aget_state(_sqlite_owner_cfg("t1", "A")) is not None
+    with pytest.raises(StorageError):
+        await cp.aput_state(_sqlite_owner_cfg("t1", "B"), MyState())
+
+
+@pytest.mark.asyncio
+async def test_sqlite_owner_only_messages(cp):
+    await cp.aput_messages(_sqlite_owner_cfg("t1", "A"), [Message.text_message("hi", role="user")])
+    assert await cp.alist_messages(_sqlite_owner_cfg("t1", "B")) == []
+    assert len(await cp.alist_messages(_sqlite_owner_cfg("t1", "A"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_no_policy_backward_compatible(cp):
+    await cp.aput_state({"thread_id": "t1", "user_id": "A"}, MyState())
+    assert await cp.aget_state({"thread_id": "t1", "user_id": "B"}) is not None

@@ -32,6 +32,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
+from agentflow.core.exceptions import StorageError
 from agentflow.core.state import AgentState, Message
 from agentflow.utils.callable_utils import run_coroutine
 from agentflow.utils.thread_info import ThreadInfo
@@ -101,6 +102,14 @@ DDL_STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_af_cache_namespace ON af_cache (namespace)",
+    # Thread ownership: first writer of a thread owns it. Used to enforce owner-only
+    # access when the request policy (config["authz"]) asks for it.
+    """
+    CREATE TABLE IF NOT EXISTS af_thread_owner (
+        thread_id TEXT NOT NULL PRIMARY KEY,
+        owner_id  TEXT NOT NULL
+    )
+    """,
 )
 
 
@@ -167,6 +176,29 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
     def _get_config_key(self, config: dict[str, Any]) -> str:
         return str(config.get("thread_id", ""))
 
+    async def _record_owner(self, conn: "aiosqlite.Connection", config: dict[str, Any]) -> None:
+        """Record the caller as the thread's owner on first write (needs a user_id)."""
+        user_id = config.get("user_id") if isinstance(config, dict) else None
+        if not user_id:
+            return
+        await conn.execute(
+            "INSERT OR IGNORE INTO af_thread_owner (thread_id, owner_id) VALUES (?, ?)",
+            (self._get_config_key(config), str(user_id)),
+        )
+
+    async def _owner_denied(self, config: dict[str, Any]) -> bool:
+        """True when isolation is active and the caller does not own this thread."""
+        user_id = config.get("user_id") if isinstance(config, dict) else None
+        if not self._isolation_enabled(config, user_id):
+            return False
+        conn = await self._get_conn()
+        async with conn.execute(
+            "SELECT owner_id FROM af_thread_owner WHERE thread_id = ?",
+            (self._get_config_key(config),),
+        ) as cur:
+            row = await cur.fetchone()
+        return row is not None and str(row["owner_id"]) != str(user_id)
+
     def _serialize_state(self, state: StateT) -> str:
         data = state.model_dump(mode="json")
         cls = state.__class__
@@ -232,9 +264,12 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
 
     async def aput_state(self, config: dict[str, Any], state: StateT) -> StateT:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            raise StorageError("Thread is owned by a different user")
         key = self._get_config_key(config)
         data = self._serialize_state(state)
         async with self._write() as conn:
+            await self._record_owner(conn, config)
             await conn.execute(
                 """
                 INSERT INTO af_states (thread_id, state_data, updated_at)
@@ -250,6 +285,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
 
     async def aget_state(self, config: dict[str, Any]) -> StateT | None:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            return None
         key = self._get_config_key(config)
         conn = await self._get_conn()
         async with conn.execute(
@@ -262,6 +299,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
 
     async def aclear_state(self, config: dict[str, Any]) -> bool:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            return True  # no-op, do not reveal existence
         key = self._get_config_key(config)
         async with self._write() as conn:
             await conn.execute("DELETE FROM af_states WHERE thread_id = ?", (key,))
@@ -290,6 +329,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
 
     async def aget_state_cache(self, config: dict[str, Any]) -> StateT | None:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            return None
         key = self._get_config_key(config)
         conn = await self._get_conn()
         async with conn.execute(
@@ -394,9 +435,12 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
         metadata: dict[str, Any] | None = None,
     ) -> bool:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            raise StorageError("Thread is owned by a different user")
         key = self._get_config_key(config)
         now = time.time()
         async with self._write() as conn:
+            await self._record_owner(conn, config)
             for msg in messages:
                 await conn.execute(
                     """
@@ -413,6 +457,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
     async def aget_message(self, config: dict[str, Any], message_id: str | int) -> Message:
         await self._ensure_setup()
         key = self._get_config_key(config)
+        if await self._owner_denied(config):
+            raise IndexError(f"Message with ID {message_id} not found for thread: {key}")
         conn = await self._get_conn()
         async with conn.execute(
             "SELECT message_data FROM af_messages WHERE thread_id = ? AND message_id = ?",
@@ -431,6 +477,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
         limit: int | None = None,
     ) -> list[Message]:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            return []
         key = self._get_config_key(config)
         conn = await self._get_conn()
         async with conn.execute(
@@ -455,6 +503,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
     async def adelete_message(self, config: dict[str, Any], message_id: str | int) -> bool:
         await self._ensure_setup()
         key = self._get_config_key(config)
+        if await self._owner_denied(config):
+            raise IndexError(f"Message with ID {message_id} not found for thread: {key}")
         conn = await self._get_conn()
         async with conn.execute(
             "SELECT id FROM af_messages WHERE thread_id = ? AND message_id = ?",
@@ -482,8 +532,11 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
                 "ThreadInfo.thread_id must match config['thread_id']: "
                 f"{thread_info.thread_id!r} != {key!r}"
             )
+        if await self._owner_denied(config):
+            raise StorageError("Thread is owned by a different user")
         data = _dumps(thread_info.model_dump(mode="json"))
         async with self._write() as conn:
+            await self._record_owner(conn, config)
             await conn.execute(
                 """
                 INSERT INTO af_threads (thread_id, thread_data, updated_at)
@@ -498,6 +551,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
 
     async def aget_thread(self, config: dict[str, Any]) -> ThreadInfo | None:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            return None
         key = self._get_config_key(config)
         conn = await self._get_conn()
         async with conn.execute(
@@ -528,6 +583,8 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
         limit: int | None = None,
     ) -> list[ThreadInfo]:
         await self._ensure_setup()
+        user_id = config.get("user_id") if isinstance(config, dict) else None
+        isolate = self._isolation_enabled(config, user_id)
         conn = await self._get_conn()
         async with conn.execute(
             "SELECT thread_data FROM af_threads ORDER BY updated_at DESC"
@@ -537,6 +594,10 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
         threads: list[ThreadInfo] = [
             ThreadInfo.model_validate(json.loads(row["thread_data"])) for row in rows
         ]
+
+        # Owner-scope the listing when the policy asks for it.
+        if isolate:
+            threads = [t for t in threads if str(t.user_id) == str(user_id)]
 
         if search:
             needle = search.lower()
@@ -550,12 +611,15 @@ class SqliteCheckpointer(BaseCheckpointer[StateT]):
 
     async def aclean_thread(self, config: dict[str, Any]) -> bool:
         await self._ensure_setup()
+        if await self._owner_denied(config):
+            return False  # not the owner -> no-op
         key = self._get_config_key(config)
         async with self._write() as conn:
             await conn.execute("DELETE FROM af_threads WHERE thread_id = ?", (key,))
             await conn.execute("DELETE FROM af_messages WHERE thread_id = ?", (key,))
             await conn.execute("DELETE FROM af_states WHERE thread_id = ?", (key,))
             await conn.execute("DELETE FROM af_state_cache WHERE thread_id = ?", (key,))
+            await conn.execute("DELETE FROM af_thread_owner WHERE thread_id = ?", (key,))
         return True
 
     # ------------------------------------------------------------------

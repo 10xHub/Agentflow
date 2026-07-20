@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from agentflow.core.exceptions import StorageError
 from agentflow.core.state import AgentState, Message
 from agentflow.utils.callable_utils import run_coroutine
 from agentflow.utils.thread_info import ThreadInfo
@@ -57,6 +58,11 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         # Thread storage
         self._threads: dict[str, dict[str, Any]] = {}
 
+        # Thread ownership: config-key (thread_id) -> owner user_id. The first writer of a
+        # thread owns it. Used to enforce owner-only access when the request policy
+        # (config["authz"]) asks for it -- see _owner_denied / _record_owner.
+        self._thread_owner: dict[str, str] = {}
+
         # Tool execution ledger (idempotency): "<thread>:<tool_call_id>" -> result
         self._tool_results: dict[str, dict[str, Any]] = {}
 
@@ -93,6 +99,24 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         thread_id = config.get("thread_id", "")
         return str(thread_id)
 
+    def _record_owner(self, config: dict[str, Any]) -> None:
+        """Record the caller as the thread's owner on first write (needs a user_id)."""
+        user_id = config.get("user_id") if isinstance(config, dict) else None
+        if user_id:
+            self._thread_owner.setdefault(self._get_config_key(config), str(user_id))
+
+    def _owner_denied(self, config: dict[str, Any]) -> bool:
+        """True when isolation is active and the caller does not own this thread.
+
+        A thread with no recorded owner (brand new) is never denied -- the caller becomes
+        its owner on write, and reads simply find nothing.
+        """
+        user_id = config.get("user_id") if isinstance(config, dict) else None
+        if not self._isolation_enabled(config, user_id):
+            return False
+        owner = self._thread_owner.get(self._get_config_key(config))
+        return owner is not None and str(owner) != str(user_id)
+
     # -------------------------
     # State methods Async
     # -------------------------
@@ -107,8 +131,11 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             StateT: The stored state object.
         """
+        if self._owner_denied(config):
+            raise StorageError("Thread is owned by a different user")
         key = self._get_config_key(config)
         async with self._state_lock:
+            self._record_owner(config)
             self._states[key] = state
             logger.debug(f"Stored state for key: {key}")
             return state
@@ -123,6 +150,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             StateT | None: Retrieved state or None.
         """
+        if self._owner_denied(config):
+            return None  # not the owner -> as if it does not exist
         key = self._get_config_key(config)
         async with self._state_lock:
             state = self._states.get(key)
@@ -139,6 +168,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             bool: True if cleared.
         """
+        if self._owner_denied(config):
+            return True  # not the owner -> no-op, do not reveal existence
         key = self._get_config_key(config)
         async with self._state_lock:
             if key in self._states:
@@ -173,6 +204,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             StateT | None: Cached state or None.
         """
+        if self._owner_denied(config):
+            return None
         key = self._get_config_key(config)
         async with self._state_lock:
             cache = self._state_cache.get(key)
@@ -295,8 +328,11 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             bool: True if stored.
         """
+        if self._owner_denied(config):
+            raise StorageError("Thread is owned by a different user")
         key = self._get_config_key(config)
         async with self._messages_lock:
+            self._record_owner(config)
             self._messages[key].extend(messages)
             if metadata:
                 self._message_metadata[key] = metadata
@@ -318,6 +354,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
             IndexError: If message not found.
         """
         key = self._get_config_key(config)
+        if self._owner_denied(config):
+            raise IndexError(f"Message with ID {message_id} not found for config key: {key}")
         async with self._messages_lock:
             messages = self._messages.get(key, [])
             for msg in messages:
@@ -344,6 +382,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             list[Message]: List of message objects.
         """
+        if self._owner_denied(config):
+            return []
         key = self._get_config_key(config)
         async with self._messages_lock:
             messages = self._messages.get(key, [])
@@ -377,6 +417,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
             IndexError: If message not found.
         """
         key = self._get_config_key(config)
+        if self._owner_denied(config):
+            raise IndexError(f"Message with ID {message_id} not found for config key: {key}")
         async with self._messages_lock:
             messages = self._messages.get(key, [])
             for msg in messages:
@@ -434,8 +476,11 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             bool: True if stored.
         """
+        if self._owner_denied(config):
+            raise StorageError("Thread is owned by a different user")
         key = self._get_config_key(config)
         async with self._threads_lock:
+            self._record_owner(config)
             self._threads[key] = thread_info.model_dump()
             logger.debug(f"Stored thread info for key: {key}")
             return True
@@ -467,6 +512,8 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             ThreadInfo | None: Thread information object or None.
         """
+        if self._owner_denied(config):
+            return None
         key = self._get_config_key(config)
         async with self._threads_lock:
             thread = self._threads.get(key)
@@ -492,8 +539,14 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             list[ThreadInfo]: List of thread information objects.
         """
+        user_id = config.get("user_id") if isinstance(config, dict) else None
+        isolate = self._isolation_enabled(config, user_id)
         async with self._threads_lock:
             threads = list(self._threads.values())
+
+            # Owner-scope the listing when the policy asks for it.
+            if isolate:
+                threads = [t for t in threads if str(t.get("user_id")) == str(user_id)]
 
             # Apply search filter if provided
             if search:
@@ -518,10 +571,13 @@ class InMemoryCheckpointer[StateT: AgentState](BaseCheckpointer[StateT]):
         Returns:
             bool: True if cleaned.
         """
+        if self._owner_denied(config):
+            return False  # not the owner -> no-op
         key = self._get_config_key(config)
         async with self._threads_lock:
             if key in self._threads:
                 del self._threads[key]
+                self._thread_owner.pop(key, None)
                 logger.debug(f"Cleaned thread for key: {key}")
                 return True
         return False
