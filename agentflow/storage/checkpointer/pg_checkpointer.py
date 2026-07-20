@@ -1060,7 +1060,7 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         """
         if self._isolation_active(user_id, config):
             return (
-                f"thread_id = $1 AND thread_id IN "
+                f"thread_id = $1 AND thread_id IN "  # noqa: S608
                 f"(SELECT thread_id FROM {self._get_table_name('threads')} "
                 f"WHERE user_id = $2)",
                 [thread_id, user_id],
@@ -1092,7 +1092,7 @@ class PgCheckpointer(BaseCheckpointer[StateT]):
         # Table name is regex-validated by _get_table_name; user_param is a bind
         # placeholder index, never a value. No interpolation of caller data.
         return (
-            f"thread_id IN (SELECT thread_id FROM {self._get_table_name('threads')} "
+            f"thread_id IN (SELECT thread_id FROM {self._get_table_name('threads')} "  # noqa: S608
             f"WHERE user_id = ${user_param})"
         )
 

@@ -15,7 +15,6 @@ This package provides:
 from .graph_error import GraphError
 from .node_error import NodeError
 from .recursion_error import GraphRecursionError
-from .timeout_error import GraphStopRequested, NodeTimeoutError
 from .storage_exceptions import (
     MetricsError,
     ResourceNotFoundError,
@@ -25,6 +24,7 @@ from .storage_exceptions import (
     StorageError,
     TransientStorageError,
 )
+from .timeout_error import GraphStopRequested, NodeTimeoutError
 
 
 __all__ = [

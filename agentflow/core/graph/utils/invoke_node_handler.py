@@ -30,10 +30,9 @@ from agentflow.core.graph.utils.guards import execute_with_guards, resolve_timeo
 from agentflow.core.graph.utils.utils import process_node_result
 from agentflow.core.state import AgentState, Message
 from agentflow.core.state.message_block import ToolResultBlock
-from agentflow.storage.checkpointer import BaseCheckpointer
-from agentflow.utils.constants import DEFAULT_TOOL_TIMEOUT_SECONDS
 from agentflow.runtime.publisher.events import ContentType, Event, EventModel, EventType
 from agentflow.runtime.publisher.publish import publish_event
+from agentflow.storage.checkpointer import BaseCheckpointer
 from agentflow.utils import (
     CallbackContext,
     CallbackManager,
@@ -42,6 +41,7 @@ from agentflow.utils import (
     metrics,
 )
 from agentflow.utils.command import Command
+from agentflow.utils.constants import DEFAULT_TOOL_TIMEOUT_SECONDS
 
 from .handler_mixins import BaseLoggingMixin
 
@@ -384,8 +384,7 @@ class InvokeNodeHandler(BaseLoggingMixin):
             is_parallel = len(last_message.tools_calls) > 1
             baseline = copy.deepcopy(state) if is_parallel else None
             branch_states = [
-                copy.deepcopy(state) if is_parallel else state
-                for _ in last_message.tools_calls
+                copy.deepcopy(state) if is_parallel else state for _ in last_message.tools_calls
             ]
 
             tasks = [
@@ -397,9 +396,7 @@ class InvokeNodeHandler(BaseLoggingMixin):
                         origin_message_id=origin_message_id,
                     )
                 )
-                for tool_call, branch in zip(
-                    last_message.tools_calls, branch_states, strict=True
-                )
+                for tool_call, branch in zip(last_message.tools_calls, branch_states, strict=True)
             ]
 
             # gather(...) without return_exceptions let one failing tool propagate

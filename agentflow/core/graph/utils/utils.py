@@ -532,9 +532,7 @@ def get_next_node(
                     edge.to_node,
                 )
                 raise GraphError(
-                    message=(
-                        f"Conditional edge from '{edge.from_node}' raised while routing: {e}"
-                    ),
+                    message=(f"Conditional edge from '{edge.from_node}' raised while routing: {e}"),
                     error_code="GRAPH_ROUTING_001",
                     context={
                         "from_node": edge.from_node,

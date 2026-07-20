@@ -16,8 +16,8 @@ Shape::
 
     config["authz"] = {
         "user_id": "u1",
-        "scope":   "owner" | "none",   # data isolation policy
-        "scopes":  ["checkpointer:read", "graph:invoke", ...],
+        "scope": "owner" | "none",  # data isolation policy
+        "scopes": ["checkpointer:read", "graph:invoke", ...],
     }
 
 When ``config["authz"]`` is absent the defaults are permissive (isolation falls back to the
@@ -125,7 +125,7 @@ def has_scope(config: Any, scope: str) -> bool:
     if block is None:
         return True  # no policy -> allow (single-user / direct SDK)
     scopes = block.get("scopes")
-    return isinstance(scopes, (list, tuple, set, frozenset)) and scope in scopes
+    return isinstance(scopes, list | tuple | set | frozenset) and scope in scopes
 
 
 def build_authz(

@@ -54,7 +54,9 @@ def _guard_logfire() -> None:
 
 def _guard_otlp_http() -> None:
     try:
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter  # noqa: F401
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,  # noqa: F401
+        )
     except ImportError as exc:
         raise ImportError(
             "opentelemetry-exporter-otlp-proto-http is required for LangSmith tracing. "

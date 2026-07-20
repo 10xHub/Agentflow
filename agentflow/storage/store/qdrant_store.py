@@ -259,15 +259,13 @@ class QdrantStore(BaseStore):
             if collection in self._collection_cache:
                 return
 
-            await self._ensure_collection_exists_locked(
-                collection, PayloadSchemaType, VectorParams
-            )
+            await self._ensure_collection_exists_locked(collection, PayloadSchemaType, VectorParams)
 
     async def _ensure_collection_exists_locked(
         self,
         collection: str,
-        PayloadSchemaType,  # noqa: N803
-        VectorParams,  # noqa: N803
+        PayloadSchemaType,
+        VectorParams,
     ) -> None:
         """Create the collection and its payload indexes. Caller holds the lock."""
         try:

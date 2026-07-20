@@ -13,7 +13,8 @@ distribution metadata rather than hardcoded, so there is a single source of trut
 installed -- which is exactly how the previous 0.8.0-vs-0.7.5.1 mismatch arose.
 """
 
-from importlib.metadata import PackageNotFoundError, version as _dist_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 
 
 try:

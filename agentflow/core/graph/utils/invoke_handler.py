@@ -99,7 +99,7 @@ class InvokeHandler[StateT: AgentState](
         stop_check = None
         if checkpointer:
 
-            async def stop_check() -> bool:  # noqa: F811
+            async def stop_check() -> bool:
                 return await checkpointer.ais_stop_requested(config)
 
         # Node-level metrics. The engine emitted no counters or histograms at all,
@@ -135,7 +135,7 @@ class InvokeHandler[StateT: AgentState](
             metrics.counter("agentflow.node.errors").inc(attributes=attrs)
             raise
 
-    async def _execute_graph(  # noqa: PLR0912, PLR0915
+    async def _execute_graph(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         state: StateT,
         config: dict[str, Any],

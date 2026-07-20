@@ -81,9 +81,7 @@ class LangsmithPublisher(OtelPublisher):
         level: ObservabilityLevel = ObservabilityLevel.STANDARD,
         tracer_provider: Any = None,
     ) -> None:
-        processor = _build_langsmith_processor(
-            api_key=api_key, project=project, endpoint=endpoint
-        )
+        processor = _build_langsmith_processor(api_key=api_key, project=project, endpoint=endpoint)
 
         if tracer_provider is None:
             from opentelemetry import trace

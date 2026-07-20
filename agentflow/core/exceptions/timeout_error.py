@@ -44,7 +44,7 @@ class NodeTimeoutError(NodeError):
         super().__init__(message, error_code, context)
 
 
-class GraphStopRequested(Exception):  # noqa: N818
+class GraphStopRequested(Exception):
     """
     Signals that a stop was requested while a node was still running.
 
