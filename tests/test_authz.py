@@ -50,3 +50,33 @@ def test_has_scope_permissive_when_no_block():
 def test_get_authz_ignores_malformed():
     assert get_authz({"authz": "not-a-dict"}) is None
     assert get_authz("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# Store isolation helper (BaseStore._scope_user_id honors the policy)
+# ---------------------------------------------------------------------------
+
+
+def _min_store():
+    from agentflow.storage.store.base_store import BaseStore
+
+    class _S(BaseStore):
+        async def asetup(self): ...
+        async def astore(self, *a, **k): ...
+        async def asearch(self, *a, **k): ...
+        async def aget(self, *a, **k): ...
+        async def aget_all(self, *a, **k): ...
+        async def aupdate(self, *a, **k): ...
+        async def adelete(self, *a, **k): ...
+        async def aforget_memory(self, *a, **k): ...
+
+    return _S()
+
+
+def test_store_scope_user_id_honors_policy():
+    s = _min_store()
+    owner = {"user": {"authz": build_authz("A", scope=SCOPE_OWNER)}}
+    none = {"user": {"authz": build_authz("A", scope=SCOPE_NONE)}}
+    assert s._scope_user_id(owner, "A") == "A"      # owner -> scope to A
+    assert s._scope_user_id(none, "A") is None       # allow_all -> do not scope
+    assert s._scope_user_id({}, "A") == "A"          # no policy -> safe default (scope)
