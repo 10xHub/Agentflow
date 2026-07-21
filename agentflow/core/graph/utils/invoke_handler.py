@@ -7,9 +7,14 @@ from collections.abc import Callable
 
 from injectq import inject, Inject
 
-from agentflow.core.exceptions import GraphRecursionError
+from agentflow.core.exceptions import (
+    GraphRecursionError,
+    GraphStopRequested,
+    NodeTimeoutError,
+)
 from agentflow.core.graph.edge import Edge
 from agentflow.core.graph.node import Node
+from agentflow.core.graph.utils.guards import execute_with_guards, resolve_timeout
 from agentflow.core.graph.utils.utils import (
     calculate_token_usage,
     call_realtime_sync,
@@ -18,11 +23,14 @@ from agentflow.core.graph.utils.utils import (
     parse_response,
     sync_data,
 )
+from agentflow.storage.checkpointer import BaseCheckpointer
+from agentflow.utils.constants import DEFAULT_NODE_TIMEOUT_SECONDS
 from agentflow.runtime.publisher.events import ContentType, Event, EventModel, EventType
 from agentflow.runtime.publisher.publish import publish_event
 from agentflow.core.state import AgentState, Message
 from agentflow.core.state.message_block import RemoteToolCallBlock
-from agentflow.utils import END, ResponseGranularity
+from agentflow.utils import END, ResponseGranularity, metrics
+from agentflow.utils.logging import bind_log_context_from_config, set_log_context
 from agentflow.core.state.reducers import add_messages
 from agentflow.utils.callbacks import CallbackManager, GraphLifecycleContext
 
@@ -70,7 +78,64 @@ class InvokeHandler[StateT: AgentState](
         self._set_interrupts(interrupt_before, interrupt_after)
         self.callback_mgr = callback_mgr
 
-    async def _execute_graph(  # noqa: PLR0912, PLR0915
+    async def _execute_node_guarded(
+        self,
+        node: Node,
+        node_name: str,
+        config: dict[str, Any],
+        state: StateT,
+        checkpointer: BaseCheckpointer = Inject[BaseCheckpointer],
+    ):
+        """Execute a node under a deadline, cancellable by an out-of-band stop.
+
+        Bare `await node.execute(...)` had no bound and no way in: a node hung on
+        a socket blocked the run forever, and because control never returned to
+        the loop, the between-nodes stop check never ran. Here the node runs as a
+        task we can actually cancel -- on the deadline, or as soon as a stop
+        request shows up.
+        """
+        timeout = resolve_timeout(config, "node_timeout", DEFAULT_NODE_TIMEOUT_SECONDS)
+
+        stop_check = None
+        if checkpointer:
+
+            async def stop_check() -> bool:
+                return await checkpointer.ais_stop_requested(config)
+
+        # Node-level metrics. The engine emitted no counters or histograms at all,
+        # so operators had spans but nothing to alert on -- no error rate, no
+        # latency distribution. The timer tags each observation with its outcome,
+        # so success and failure latencies can be separated.
+        attrs = {"node": node_name}
+        metrics.counter("agentflow.node.executions").inc(attributes=attrs)
+
+        try:
+            with metrics.timer("agentflow.node.duration", attributes=attrs):
+                return await execute_with_guards(
+                    node.execute(config, state),  # type: ignore[arg-type]
+                    timeout=timeout,
+                    stop_check=stop_check,
+                    on_timeout=lambda: NodeTimeoutError(
+                        message=(
+                            f"Node '{node_name}' exceeded its timeout of {timeout}s "
+                            f"and was cancelled"
+                        ),
+                        error_code="NODE_TIMEOUT_001",
+                        context={"node_name": node_name, "timeout": timeout},
+                    ),
+                    on_stop=lambda: GraphStopRequested(node_name),
+                )
+        except NodeTimeoutError:
+            metrics.counter("agentflow.node.timeouts").inc(attributes=attrs)
+            raise
+        except GraphStopRequested:
+            metrics.counter("agentflow.node.stopped").inc(attributes=attrs)
+            raise
+        except Exception:
+            metrics.counter("agentflow.node.errors").inc(attributes=attrs)
+            raise
+
+    async def _execute_graph(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         state: StateT,
         config: dict[str, Any],
@@ -85,6 +150,9 @@ class InvokeHandler[StateT: AgentState](
         logger.debug("DEBUG: END constant value: %r", END)
         logger.debug("DEBUG: Are they equal? %s", state.execution_meta.current_node == END)
         messages: list[Message] = []
+        # How many of `messages` have already been durably persisted by a per-step
+        # checkpoint, so terminal and subsequent writes only send the new ones.
+        persisted_upto = 0
         max_steps = config.get("recursion_limit", 25)
         logger.debug("Max steps limit set to %d", max_steps)
 
@@ -182,7 +250,21 @@ class InvokeHandler[StateT: AgentState](
                 ###############################################
 
                 config["_node_name"] = current_node
-                result = await node.execute(config, state)  # type: ignore
+                # Narrow the correlation context to the node now executing.
+                set_log_context(node=current_node)
+                try:
+                    result = await self._execute_node_guarded(node, current_node, config, state)
+                except GraphStopRequested:
+                    # The node was cancelled mid-flight because a stop arrived.
+                    # Hand off to the normal stop path so the run is marked
+                    # stopped, persisted, and reported exactly as a between-nodes
+                    # stop would be -- this is control flow, not a failure.
+                    logger.info(
+                        "Node '%s' cancelled by stop request; finalizing run",
+                        current_node,
+                    )
+                    await check_stop_requested(state, current_node, event, messages, config)
+                    return state, messages
 
                 ###############################################
                 ##### Node Execution Finished #################
@@ -310,7 +392,30 @@ class InvokeHandler[StateT: AgentState](
                 # Advance step after successful node execution
                 step += 1
                 state.advance_step()
-                await call_realtime_sync(state, config)
+
+                # Durable per-step checkpoint.
+                #
+                # Previously this only wrote the Redis cache, and the durable
+                # write happened solely at terminal points (completion, error,
+                # interrupt, stop). A pod killed mid-run therefore resumed from
+                # the last terminal checkpoint -- or, once the 24h cache TTL had
+                # lapsed or Redis restarted, from the very beginning. Persisting
+                # each completed step bounds a crash to replaying one node.
+                #
+                # Only messages not yet persisted are written, so a long run does
+                # not re-upsert its whole history on every step.
+                if config.get("durable_checkpoint_every_step", True):
+                    pending = messages[persisted_upto:]
+                    await sync_data(
+                        state=state,
+                        config=config,
+                        messages=pending,
+                        trim=False,
+                    )
+                    persisted_upto = len(messages)
+                else:
+                    await call_realtime_sync(state, config)
+
                 event.event_type = EventType.UPDATE
 
                 event.metadata["State_Updated"] = "State Updated"
@@ -428,6 +533,10 @@ class InvokeHandler[StateT: AgentState](
             response_granularity,
         )
         input_data = input_data or {}
+
+        # Bind run correlation for every log line emitted underneath this run, so a
+        # single run can actually be grepped out of a busy multi-tenant server.
+        bind_log_context_from_config(config)
 
         # Load or initialize state
         logger.debug("Loading or creating state from input data")

@@ -59,6 +59,23 @@ class BaseStore(ABC):
         """
         raise NotImplementedError
 
+    def _scope_user_id(self, config: dict[str, Any], user_id: str | int | None) -> str | int | None:
+        """Return the user_id to scope memory operations by, honoring the authz policy.
+
+        Mirrors the checkpointer's isolation rule so one policy governs both:
+
+        - ``config["authz"].scope == "none"`` -> ``None`` (do not scope; see everything).
+        - otherwise (``"owner"`` or no policy) -> the given ``user_id`` (owner-only).
+
+        The safe default (no policy) keeps scoping by ``user_id`` -- memory is personal, so
+        it stays isolated unless a developer explicitly runs ``allow_all``/``scope=none``.
+        """
+        from agentflow.core.authz import SCOPE_NONE, isolation_scope
+
+        if isolation_scope(config) == SCOPE_NONE:
+            return None
+        return user_id
+
     async def generate_framework_id(self) -> str:
         """Generate a unique ID using the framework's DI-registered ID generator.
 

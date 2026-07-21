@@ -20,19 +20,24 @@ from .storage_exceptions import (
     ResourceNotFoundError,
     SchemaVersionError,
     SerializationError,
+    StaleStateError,
     StorageError,
     TransientStorageError,
 )
+from .timeout_error import GraphStopRequested, NodeTimeoutError
 
 
 __all__ = [
     "GraphError",
     "GraphRecursionError",
+    "GraphStopRequested",
     "MetricsError",
     "NodeError",
+    "NodeTimeoutError",
     "ResourceNotFoundError",
     "SchemaVersionError",
     "SerializationError",
+    "StaleStateError",
     "StorageError",
     "TransientStorageError",
 ]

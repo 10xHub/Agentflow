@@ -169,12 +169,18 @@ class StateGraph[StateT: AgentState]:
             allow_none=True,
             allow_concrete=True,
         )
-        self._container.bind_instance(
-            BasePublisher,
-            self._publisher,
-            allow_none=True,
-            allow_concrete=True,
-        )
+        # Bind our own publisher when we have one. When we don't, respect a
+        # publisher already provided via the DI container (e.g. wired by an
+        # external bootstrap such as the API server before compilation) instead
+        # of clobbering it with None. Binding is frozen at container.compile(),
+        # so a pre-compile container binding is the only reliable attach point.
+        if self._publisher is not None or self._container.try_get(BasePublisher) is None:
+            self._container.bind_instance(
+                BasePublisher,
+                self._publisher,
+                allow_none=True,
+                allow_concrete=True,
+            )
 
         # register id generator as factory
         self._container.bind_instance(

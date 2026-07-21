@@ -116,8 +116,12 @@ class QdrantStore(BaseStore):
             port = port or 6333
             self.client = AsyncQdrantClient(host=host, port=port, api_key=api_key, **kwargs)
 
-        # Cache for collection existence checks
+        # Cache for collection existence checks, so the network round-trip happens
+        # once per collection rather than on every store/search/get.
         self._collection_cache = set()
+        # Serializes the cold-start miss: without it, N concurrent first-requests
+        # all miss the cache together and each issues its own create_collection.
+        self._collection_lock = asyncio.Lock()
         self._setup_lock = asyncio.Lock()
 
         self.collection = collection or DEFAULT_COLLECTION
@@ -237,12 +241,33 @@ class QdrantStore(BaseStore):
         return Filter(must=conditions) if conditions else None
 
     async def _ensure_collection_exists(self, collection: str) -> None:
-        """Ensure collection exists, create if not."""
+        """Ensure collection exists, create if not.
+
+        The `_collection_cache` fast path means the network round-trip happens once
+        per collection, not on every store/search/get. The lock closes the cold-start
+        race: without it, N concurrent first-requests all missed the cache together
+        and each issued its own get_collections()/create_collection() call.
+        """
         if collection in self._collection_cache:
             return
 
         from qdrant_client.http.models import PayloadSchemaType, VectorParams
 
+        async with self._collection_lock:
+            # Re-check under the lock: another coroutine may have ensured it while
+            # we were waiting.
+            if collection in self._collection_cache:
+                return
+
+            await self._ensure_collection_exists_locked(collection, PayloadSchemaType, VectorParams)
+
+    async def _ensure_collection_exists_locked(
+        self,
+        collection: str,
+        PayloadSchemaType,
+        VectorParams,
+    ) -> None:
+        """Create the collection and its payload indexes. Caller holds the lock."""
         try:
             # Check if collection exists
             collections = await self.client.get_collections()
@@ -419,9 +444,10 @@ class QdrantStore(BaseStore):
         if not query_vector or len(query_vector) != self.embedding.dimension:
             raise ValueError("Embedding service returned invalid vector")
 
-        # Build filter — search by user only; thread_id is excluded
+        # Build filter — search by user only; thread_id is excluded. The user filter is
+        # dropped when the authz policy is scope="none" (allow_all).
         search_filter = self._build_qdrant_filter(
-            user_id=user_id,
+            user_id=self._scope_user_id(config, user_id),
             memory_type=memory_type,
             category=category,
             filters=filters,
@@ -468,8 +494,9 @@ class QdrantStore(BaseStore):
             result = self._point_to_search_result(point)
 
             # Verify user access only — thread_id is intentionally not checked
-            # because long-term memory is cross-thread.
-            if user_id and result.user_id != user_id:
+            # because long-term memory is cross-thread. Skipped under scope="none".
+            scoped_user_id = self._scope_user_id(config, user_id)
+            if scoped_user_id and result.user_id != scoped_user_id:
                 return None
 
             return result
@@ -490,9 +517,9 @@ class QdrantStore(BaseStore):
         # Ensure collection exists
         await self._ensure_collection_exists(collection)
 
-        # Build filter
+        # Build filter (user filter dropped under scope="none").
         search_filter = self._build_qdrant_filter(
-            user_id=user_id,
+            user_id=self._scope_user_id(config, user_id),
         )
 
         # Perform search
@@ -529,7 +556,8 @@ class QdrantStore(BaseStore):
 
         # Verify user access only — thread_id is not an access-control boundary
         # for long-term memory (memories are shared across all threads for a user).
-        if user_id and existing.user_id != user_id:
+        scoped_user_id = self._scope_user_id(config, user_id)
+        if scoped_user_id and existing.user_id != scoped_user_id:
             raise PermissionError("User does not have permission to update this memory")
 
         # Prepare new content
@@ -603,7 +631,8 @@ class QdrantStore(BaseStore):
 
         # Verify user access only — thread_id is not an access-control boundary
         # for long-term memory.
-        if user_id and existing.user_id != user_id:
+        scoped_user_id = self._scope_user_id(config, user_id)
+        if scoped_user_id and existing.user_id != scoped_user_id:
             raise PermissionError("User does not have permission to delete this memory")
 
         # Delete from Qdrant

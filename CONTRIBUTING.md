@@ -10,6 +10,9 @@ respective packages.
 - The importable package is the nested `agentflow/` directory; this folder is the
   repo root for the core library.
 
+By participating in this project you agree to abide by our
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Getting set up
 
 We use [`uv`](https://docs.astral.sh/uv/) for environment and dependency

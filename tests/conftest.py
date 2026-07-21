@@ -6,11 +6,65 @@ This module provides common fixtures and setup for the entire test suite.
 import os
 
 import pytest
+from injectq import InjectQ
 
 from agentflow.core.graph.node import Node
 
 
 _ORIGINAL_NODE_INIT = Node.__init__
+
+
+def pytest_addoption(parser):
+    """Register the --integration flag.
+
+    Integration tests were previously gated on a `--integration` option that was
+    never actually registered, so the gate could never be satisfied and every
+    durable-storage test was permanently skipped. Registering it here is what
+    makes those tests runnable at all.
+    """
+    parser.addoption(
+        "--integration",
+        action="store_true",
+        default=False,
+        help="Run integration tests that require real services (Postgres, Redis).",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip `integration`-marked tests unless --integration is passed.
+
+    This replaces per-class `@pytest.mark.skipif(True, ...)` hardcodes, which
+    could never be turned on. Now the gate is real: pass --integration (with the
+    services running) and the durable-storage tests actually execute.
+    """
+    if config.getoption("--integration"):
+        return
+
+    skip_integration = pytest.mark.skip(
+        reason="requires real services; run with --integration (see tests/integration/)"
+    )
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip_integration)
+
+
+@pytest.fixture(autouse=True)
+def isolate_injectq_container():
+    """Give every test a clean dependency-injection container.
+
+    `InjectQ.get_instance()` is a process-wide singleton, and tests bind real
+    instances into it (publishers, checkpointers, task managers). Nothing reset
+    it between tests, so bindings leaked forward: a test that bound a publisher
+    left it installed for everything that ran afterwards. That is why the suite
+    passed per-file but failed in full-suite order -- a test asserting on its own
+    spy publisher was silently still publishing into a previous test's binding.
+
+    Resetting the singleton around each test makes the suite order-independent,
+    which is a precondition for the suite meaning anything at all.
+    """
+    InjectQ.reset_instance()
+    yield
+    InjectQ.reset_instance()
 
 
 def _compat_node_init(self, name, func, publisher=None):

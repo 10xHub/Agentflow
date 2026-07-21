@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a defect in 10xscale-agentflow
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please search existing issues first.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I call ..., I get ..., but I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest code snippet that reproduces the issue.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agentflow version
+      description: Output of `pip show 10xscale-agentflow` (Version field).
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM provider
+      options:
+        - Not relevant
+        - OpenAI
+        - Google GenAI (Gemini)
+        - Vertex AI
+        - OpenAI-compatible endpoint
+        - Other
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / traceback
+      description: Paste the full traceback if there is one. Redact secrets.
+      render: shell
+    validations:
+      required: false

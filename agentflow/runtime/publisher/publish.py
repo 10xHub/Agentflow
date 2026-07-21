@@ -40,5 +40,12 @@ def publish_event(
         publisher: The publisher instance (injected).
         task_manager: The background task manager (injected).
     """
-    # Store the task to prevent it from being garbage collected
+    # No sink bound -> nothing to publish. Spawning a task per event just to
+    # discover there is nowhere to send it cost a task and kept the event alive
+    # for no reason, on the hot path of every node in every run.
+    if publisher is None:
+        return
+
+    # Store the task to prevent it from being garbage collected. May return None
+    # when the manager is shedding load (see BackgroundTaskManager.create_task).
     task_manager.create_task(_publish_event_task(event, publisher))

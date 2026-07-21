@@ -23,3 +23,13 @@ test:
 test-cov:
 	uv run pytest --cov=agentflow --cov-report=html --cov-report=term-missing --cov-report=xml -v
 
+
+
+# # 1. publish to PyPI manually (Makefile)
+# make clean && make build
+# uvx twine check dist/*
+# make publish                 # twine upload -> PyPI
+
+# # 2. tag -> GitHub Action builds + cuts the GitHub Release
+# git tag v0.8.0               # must be v-prefixed and == pyproject version (0.8.0)
+# git push origin v0.8.0

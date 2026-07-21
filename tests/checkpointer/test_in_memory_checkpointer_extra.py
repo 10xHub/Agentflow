@@ -387,3 +387,80 @@ class TestAsyncRelease:
         listed = await cp.alist_messages(config_t1)
         assert listed == []
         assert await cp.aget_thread(config_t1) is None
+
+
+# ---------------------------------------------------------------------------
+# aget_thread_owner — global ownership resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_aget_thread_owner_returns_owner_when_registered(cp):
+    cfg = {"thread_id": "t-own", "user_id": "alice"}
+    await cp.aput_thread(cfg, ThreadInfo(thread_id="t-own", user_id="alice"))
+    assert await cp.aget_thread_owner("t-own") == "alice"
+
+
+@pytest.mark.asyncio
+async def test_aget_thread_owner_none_for_unknown_thread(cp):
+    assert await cp.aget_thread_owner("ghost") is None
+
+
+@pytest.mark.asyncio
+async def test_base_default_raises_not_implemented():
+    """A backend that does not override the hook must fail loud, never silently
+    report 'no owner' (which would defeat owner-based authorization)."""
+    from agentflow.storage.checkpointer.base_checkpointer import BaseCheckpointer
+
+    # Bypass ABC instantiation guard to exercise the concrete default body directly.
+    inst = object.__new__(InMemoryCheckpointer)
+    with pytest.raises(NotImplementedError):
+        await BaseCheckpointer.aget_thread_owner(inst, "x")
+
+
+# ---------------------------------------------------------------------------
+# Owner-only isolation driven by config["authz"] policy
+# ---------------------------------------------------------------------------
+
+
+def _owner_cfg(thread_id, user_id):
+    from agentflow.core.authz import build_authz
+
+    return {"thread_id": thread_id, "user_id": user_id, "authz": build_authz(user_id, scope="owner")}
+
+
+@pytest.mark.asyncio
+async def test_inmem_owner_only_state(cp):
+    from agentflow.core.exceptions import StorageError
+
+    await cp.aput_state(_owner_cfg("t1", "A"), _make_state())
+    # non-owner read -> None; owner read -> present
+    assert await cp.aget_state(_owner_cfg("t1", "B")) is None
+    assert await cp.aget_state(_owner_cfg("t1", "A")) is not None
+    # non-owner write -> refused
+    with pytest.raises(StorageError):
+        await cp.aput_state(_owner_cfg("t1", "B"), _make_state())
+
+
+@pytest.mark.asyncio
+async def test_inmem_owner_only_messages(cp):
+    msg = Message.text_message("hi", role="user")
+    await cp.aput_messages(_owner_cfg("t1", "A"), [msg])
+    assert await cp.alist_messages(_owner_cfg("t1", "B")) == []
+    assert len(await cp.alist_messages(_owner_cfg("t1", "A"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_inmem_no_policy_is_backward_compatible(cp):
+    # Without an authz block, in-memory does not scope (historical behaviour).
+    await cp.aput_state({"thread_id": "t1", "user_id": "A"}, _make_state())
+    assert await cp.aget_state({"thread_id": "t1", "user_id": "B"}) is not None
+
+
+@pytest.mark.asyncio
+async def test_inmem_allow_all_scope_sees_everything(cp):
+    from agentflow.core.authz import build_authz
+
+    await cp.aput_state(_owner_cfg("t1", "A"), _make_state())
+    none_cfg = {"thread_id": "t1", "user_id": "B", "authz": build_authz("B", scope="none")}
+    assert await cp.aget_state(none_cfg) is not None

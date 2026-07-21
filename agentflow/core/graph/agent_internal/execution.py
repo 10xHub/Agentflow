@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 from injectq import Inject, InjectQ
@@ -23,6 +24,37 @@ from .constants import RetryConfig
 
 
 logger = logging.getLogger("agentflow.agent")
+
+# Valid HTTP status range, used to sanity-check anything parsed out of a message.
+HTTP_STATUS_MIN = 100
+HTTP_STATUS_MAX = 599
+
+# Matches a status code only when it is actually presented as one, either
+# labelled ("status code: 503", "HTTP 429", "error code 500") or bracketed, which
+# is how several SDKs render it ("Overloaded [529]").
+#
+# A bare "500" in prose -- a token count, a dimension, "max_tokens <= 500" -- must
+# NOT be read as a status. That was the M3 bug: the old check asked only whether
+# the digits appeared anywhere in the message, so permanent errors were retried.
+_STATUS_CODE_PATTERNS = (
+    # Labelled: "status code: 503", "status_code=503", "HTTP 429", "Error code: 500"
+    re.compile(
+        r"(?:status(?:[\s_-]*code)?|error[\s_-]*code|\bhttp\b|\bcode\b)[\s:=\-]*(\d{3})\b",
+        re.IGNORECASE,
+    ),
+    # Bracketed, as several SDKs render it: "Overloaded [529]"
+    re.compile(r"[\[\(](\d{3})[\]\)]"),
+    # Leading, as most HTTP errors render it: "503 Service Unavailable. ..."
+    re.compile(r"^\s*(\d{3})\b"),
+    # Followed by a standard reason phrase: "Rate limited: 429 Too Many Requests"
+    re.compile(
+        r"\b(\d{3})\s+(?:"
+        r"service unavailable|too many requests|internal server error|"
+        r"bad gateway|gateway time-?out|request time-?out|overloaded"
+        r")",
+        re.IGNORECASE,
+    ),
+)
 
 
 def _extract_input_tokens(response: Any) -> int:
@@ -223,11 +255,33 @@ class AgentExecutionMixin:
 
     @staticmethod
     def _extract_status_code(exc: Exception) -> int | None:
-        """Best-effort extraction of an HTTP status code from an SDK exception."""
+        """Best-effort extraction of an HTTP status code from an SDK exception.
+
+        Structured attributes are trusted. The string fallback is deliberately
+        strict: the previous version asked whether "500" appeared *anywhere* in
+        the message, so an error mentioning a token count ("max_tokens: 500") or
+        a model name was classified as a retryable server error and the call was
+        retried -- burning the retry budget on an error that would never succeed.
+        The number must now actually be presented as a status code.
+        """
         # OpenAI SDK: openai.APIStatusError has .status_code
         status = getattr(exc, "status_code", None)
         if status is not None:
-            return int(status)
+            try:
+                return int(status)
+            except (TypeError, ValueError):
+                pass
+
+        # httpx-style: exc.response.status_code
+        response = getattr(exc, "response", None)
+        if response is not None:
+            status = getattr(response, "status_code", None)
+            if status is not None:
+                try:
+                    return int(status)
+                except (TypeError, ValueError):
+                    pass
+
         # Google GenAI and generic HTTP errors often embed a code attribute
         code = getattr(exc, "code", None)
         if code is not None:
@@ -235,11 +289,16 @@ class AgentExecutionMixin:
                 return int(code)
             except (TypeError, ValueError):
                 pass
-        # Fallback: inspect the string representation for common patterns
+
+        # String fallback: only when the number is *labelled* as a status/error
+        # code, never a bare digit sequence found somewhere in the message.
         exc_str = str(exc)
-        for code in (503, 502, 500, 429, 529):
-            if str(code) in exc_str:
-                return code
+        for pattern in _STATUS_CODE_PATTERNS:
+            match = pattern.search(exc_str)
+            if match:
+                parsed = int(match.group(1))
+                if HTTP_STATUS_MIN <= parsed <= HTTP_STATUS_MAX:
+                    return parsed
         return None
 
     def _is_retryable_error(self, exc: Exception, retry_cfg: RetryConfig) -> bool:

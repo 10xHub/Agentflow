@@ -11,6 +11,45 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # The package advertises Python >= 3.12, but CI only ever ran 3.13, so
+        # 3.12 was supported on paper and never verified. Test both.
+        python-version: ["3.12", "3.13"]
+
+    # Real services. The durable-storage tests (checkpointer transactions,
+    # optimistic concurrency, Redis/Postgres consistency) cannot prove anything
+    # against mocks -- they need a real database to run against.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_agentflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POSTGRES_DSN: postgresql://test:test@localhost:5432/test_agentflow
+      REDIS_URL: redis://localhost:6379/1
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,9 +60,9 @@ jobs:
           path: |
             ~/.cache/pip
             .venv
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-pip-${{ hashFiles('**/pyproject.toml') }}
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-py${{ matrix.python-version }}-pip-
 
       - name: Cache uv
         uses: actions/cache@v5
@@ -31,9 +70,9 @@ jobs:
           path: |
             ~/.local/share/uv
             ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('.uv/config.json') }}
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-uv-${{ hashFiles('.uv/config.json') }}
           restore-keys: |
-            ${{ runner.os }}-uv-
+            ${{ runner.os }}-py${{ matrix.python-version }}-uv-
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -43,7 +82,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
@@ -54,14 +93,24 @@ jobs:
           uv sync --dev
 
       - name: Run pre-commit
+        if: matrix.python-version == '3.13'
         run: uv run pre-commit run --all-files
 
-      - name: Run tests with coverage
+      - name: Run unit tests with coverage (line + branch gated)
         run: |
           source .venv/bin/activate
           uv run pytest --cov --cov-branch --cov-report=xml
 
+      - name: Run integration tests against real Postgres + Redis
+        run: |
+          source .venv/bin/activate
+          # These exercise the durable paths (SQL, transactions, optimistic
+          # concurrency, tool ledger, cross-user isolation). They are gated behind
+          # --integration so they never run without the services above.
+          uv run pytest tests/integration --integration --no-cov
+
       - name: Upload coverage reports to Codecov
+        if: matrix.python-version == '3.13'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

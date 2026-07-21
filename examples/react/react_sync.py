@@ -91,7 +91,6 @@ agent = Agent(
     trim_context=True,
     reasoning_config=True,
     tool_node=tool_node,
-    use_vertex_ai=True,
 )
 
 

@@ -24,6 +24,7 @@ from agentflow.utils import (
     ResponseGranularity,
 )
 from agentflow.utils.background_task_manager import BackgroundTaskManager
+from agentflow.utils.constants import DEFAULT_ANONYMOUS_USER_ID
 
 from .node import Node
 from .utils.invoke_handler import InvokeHandler
@@ -168,11 +169,30 @@ class CompiledGraph[StateT: AgentState]:
 
         if "thread_id" not in cfg:
             cfg["thread_id"] = InjectQ.get_instance().try_get("generated_id") or str(uuid4())
+            # A caller who omits thread_id gets a fresh random one, which means the
+            # run cannot be resumed and `stop()` can never target it -- the caller
+            # has no way to name it. That is fine for a one-shot script but is
+            # almost never what a server wants, so say so rather than fail silently.
+            logger.warning(
+                "No thread_id in config; generated '%s'. This run cannot be resumed "
+                "or stopped, because the caller does not know its thread_id. Pass an "
+                "explicit thread_id for any run you may want to resume or stop.",
+                cfg["thread_id"],
+            )
 
         if "is_stream" not in cfg:
             cfg["is_stream"] = is_stream
         if "user_id" not in cfg:
-            cfg["user_id"] = "test-user-id"  # mock user id
+            # Was "test-user-id" -- a placeholder that looks like a real user. With
+            # per-user isolation enabled that silently filed every un-authenticated
+            # run under one fake account. "anonymous" matches what the API layer
+            # uses when no auth is configured, so the two agree.
+            cfg["user_id"] = DEFAULT_ANONYMOUS_USER_ID
+            logger.debug(
+                "No user_id in config; using '%s'. Enable auth if you need per-user "
+                "isolation -- every anonymous run shares one identity.",
+                DEFAULT_ANONYMOUS_USER_ID,
+            )
         if "run_id" not in cfg:
             cfg["run_id"] = InjectQ.get_instance().try_get("generated_id") or str(uuid4())
 
@@ -320,13 +340,20 @@ class CompiledGraph[StateT: AgentState]:
         running = state.is_running() and not state.is_interrupted()
         # Set stop flag regardless; handlers will act if running
         if running:
+            # Record the stop in its own cache entry FIRST. The running graph
+            # rewrites the state cache after every node with its own flag-less
+            # copy of the state (at the same durable version, so a version-guarded
+            # cache accepts it), which would silently swallow a flag written only
+            # into the state blob. Nothing in the run loop writes this key, so a
+            # stop recorded here always survives to the next stop check.
+            await self._checkpointer.arequest_stop(cfg)
+
+            # Also mirror it into the cached state. Redundant for checkpointers
+            # that back the stop key, but it keeps stop working for a custom
+            # checkpointer that has not implemented the generic cache (whose
+            # arequest_stop inherits the no-op default).
             state.execution_meta.stop_current_execution = StopRequestStatus.STOP_REQUESTED
-            # update cache
-            # Cache update is enough; state will be picked up by running execution
-            # As its running, cache will be available immediately
             await self._checkpointer.aput_state_cache(cfg, state)
-            # Fixme: consider putting to main state as well
-            # await self._checkpointer.aput_state(cfg, state)
             logger.info("Set stop_current_execution flag for thread_id: %s", cfg.get("thread_id"))
             return {"ok": True, "running": running}
 
@@ -541,6 +568,14 @@ class CompiledGraph[StateT: AgentState]:
             for name, node in self._state_graph.nodes.items()
             if isinstance(node.func, LiveAgent)
         ]
+
+    def is_realtime(self) -> bool:
+        """Whether this graph is a realtime (live) graph.
+
+        True when the graph contains at least one ``LiveAgent`` node, meaning it must be
+        driven via ``arealtime()`` / ``realtime()`` rather than invoke/stream.
+        """
+        return bool(self._find_live_nodes())
 
     def _guard_not_realtime(self) -> None:
         """Forcing rule: a graph containing a LiveAgent must use arealtime()."""

@@ -22,6 +22,16 @@ from agentflow.core.state import AgentState, Message
 from agentflow.utils.thread_info import ThreadInfo
 
 
+class _Txn:
+    """Minimal async context manager standing in for asyncpg's transaction()."""
+
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class TestPgCheckpointer:
     """Test suite for PgCheckpointer."""
 
@@ -30,6 +40,8 @@ class TestPgCheckpointer:
         """Mock PostgreSQL pool."""
         pool = MagicMock()
         connection = AsyncMock()
+        # conn.transaction() must return an async context manager, not a coroutine.
+        connection.transaction = MagicMock(return_value=_Txn())
         pool.is_closing.return_value = False
 
         # Create a mock async context manager for pool.acquire()
@@ -146,6 +158,8 @@ class TestPgCheckpointer:
         """Test async setup method."""
         connection = mock_pg_pool.acquire.return_value.__aenter__.return_value
         connection.execute = AsyncMock()
+        # No schema version recorded yet -> migrations run from scratch.
+        connection.fetchrow = AsyncMock(return_value=None)
 
         await checkpointer.asetup()
 
@@ -180,20 +194,20 @@ class TestPgCheckpointer:
         """Test async state operations."""
         connection = mock_pg_pool.acquire.return_value.__aenter__.return_value
         connection.execute = AsyncMock()
-        connection.fetchrow = AsyncMock()
+        # _write_state_row issues: SELECT user_id ... FOR UPDATE, then MAX(version).
+        connection.fetchrow = AsyncMock(
+            side_effect=[
+                {"user_id": sample_config["user_id"]},  # ownership check passes
+                {"v": 0},  # no prior versions
+            ]
+        )
         connection.fetchval = AsyncMock(return_value=None)  # Thread doesn't exist
 
-        # Test put_state
+        # Test put_state -> appends version 1 and records it on config
         result = await checkpointer.aput_state(sample_config, sample_state)
         assert result == sample_state
+        assert sample_config["_checkpoint_version"] == 1
         connection.execute.assert_called()
-
-        # Test get_state
-        # connection.fetchrow.return_value = {
-        #     "state_data": checkpointer._serialize_state(sample_state)
-        # }
-        # retrieved = await checkpointer.aget_state({**sample_config, "state_class": AgentState})
-        # assert isinstance(retrieved, AgentState)
 
         # Test clear_state
         await checkpointer.aclear_state(sample_config)
@@ -202,9 +216,10 @@ class TestPgCheckpointer:
     @pytest.mark.asyncio
     async def test_state_caching(self, checkpointer, sample_state, sample_config, mock_redis):
         """Test Redis caching operations."""
-        # Test cache put
+        # Test cache put -> goes through the version-guarded CAS script, not SETEX
+        mock_redis.eval = AsyncMock(return_value=1)
         await checkpointer.aput_state_cache(sample_config, sample_state)
-        mock_redis.setex.assert_called_once()
+        mock_redis.eval.assert_called_once()
 
         # Test cache get - hit
         # Properly serialize with __class_path__
@@ -281,19 +296,23 @@ class TestPgCheckpointer:
         created = await checkpointer.aput_thread(sample_config, thread_info)
         assert created is True
 
-        # Now simulate conflict -> should perform update and return False
-        connection.fetchrow = AsyncMock(return_value=None)
+        # Now simulate conflict -> should perform an owner-scoped update, return False.
+        # The UPDATE uses RETURNING, so it must yield a row (the thread is ours).
+        connection.fetchrow = AsyncMock(
+            side_effect=[None, {"thread_id": "thread_123"}]
+        )
         connection.execute = AsyncMock()
 
         thread_info2 = ThreadInfo(thread_id="thread_123", thread_name=None, metadata={"a": 1})
         created2 = await checkpointer.aput_thread(sample_config, thread_info2)
         assert created2 is False
-        # Ensure we executed the meta-only update path when thread_name is None
-        assert any(
-            "SET meta = $1, updated_at = NOW()" in str(call.args[0]) for call in connection.execute.mock_calls
-        )
+        # Ensure we ran the meta-only update path, scoped by user_id, when thread_name is None
+        update_sql = [str(call.args[0]) for call in connection.fetchrow.mock_calls if call.args]
+        assert any("SET meta = $1, updated_at = NOW()" in sql for sql in update_sql)
+        assert any("WHERE thread_id = $2 AND user_id = $3" in sql for sql in update_sql)
 
         # Test get_thread
+        connection.fetchrow = AsyncMock()
         connection.fetchrow.return_value = {
             "thread_id": "thread_123",
             "thread_name": "Test Thread",
@@ -397,10 +416,6 @@ class TestPgCheckpointerIntegration2:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(
-    True,  # Skip integration tests by default unless --integration flag is used
-    reason="Integration tests require real PostgreSQL and Redis connections",
-)
 class TestPgCheckpointerIntegration:
     """Integration tests requiring real PostgreSQL and Redis connections."""
 
