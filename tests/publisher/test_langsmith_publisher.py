@@ -178,10 +178,23 @@ class TestLangsmithPublisher:
                 LangsmithPublisher()
 
     def test_raises_import_error_when_otlp_exporter_missing(self):
-        # The langsmith extra (opentelemetry-exporter-otlp-proto-http) is not
-        # installed in the test env, so the OTLP HTTP guard should fire.
-        with patch.dict("os.environ", {"LANGSMITH_API_KEY": "k"}):
+        # Simulate opentelemetry-sdk installed but the langsmith extra
+        # (opentelemetry-exporter-otlp-proto-http) missing, so the OTLP HTTP
+        # guard fires regardless of what is actually installed in the env.
+        mods, *_ = _fake_otel_modules()
+        mods["opentelemetry.exporter.otlp.proto.http.trace_exporter"] = None
+        with patch.dict(sys.modules, mods), patch.dict("os.environ", {"LANGSMITH_API_KEY": "k"}):
             from agentflow.runtime.publisher.langsmith_publisher import LangsmithPublisher
 
             with pytest.raises(ImportError, match="opentelemetry-exporter-otlp-proto-http"):
+                LangsmithPublisher()
+
+    def test_raises_import_error_when_otel_sdk_missing(self):
+        # Neither extra installed (the CI default): the SDK guard fires first.
+        mods, *_ = _fake_otel_modules()
+        mods["opentelemetry.sdk.trace"] = None
+        with patch.dict(sys.modules, mods), patch.dict("os.environ", {"LANGSMITH_API_KEY": "k"}):
+            from agentflow.runtime.publisher.langsmith_publisher import LangsmithPublisher
+
+            with pytest.raises(ImportError, match="opentelemetry-sdk"):
                 LangsmithPublisher()

@@ -90,9 +90,11 @@ class LangsmithPublisher(OtelPublisher):
             provider = TracerProvider()
             provider.add_span_processor(processor)
             trace.set_tracer_provider(provider)
-            # OtelPublisher picks up the global TracerProvider set above.
-            super().__init__(level=level)
+            # A None tracer makes OtelPublisher pick up the global provider set above.
+            tracer = None
         else:
             tracer_provider.add_span_processor(processor)
             # Bind to the supplied provider explicitly (it may not be global).
-            super().__init__(tracer=tracer_provider.get_tracer("agentflow"), level=level)
+            tracer = tracer_provider.get_tracer("agentflow")
+
+        super().__init__(tracer=tracer, level=level)
