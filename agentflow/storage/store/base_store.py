@@ -59,9 +59,7 @@ class BaseStore(ABC):
         """
         raise NotImplementedError
 
-    def _scope_user_id(
-        self, config: dict[str, Any], user_id: str | int | None
-    ) -> str | int | None:
+    def _scope_user_id(self, config: dict[str, Any], user_id: str | int | None) -> str | int | None:
         """Return the user_id to scope memory operations by, honoring the authz policy.
 
         Mirrors the checkpointer's isolation rule so one policy governs both:
