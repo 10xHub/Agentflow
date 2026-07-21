@@ -61,14 +61,29 @@ def _min_store():
     from agentflow.storage.store.base_store import BaseStore
 
     class _S(BaseStore):
-        async def asetup(self): ...
-        async def astore(self, *a, **k): ...
-        async def asearch(self, *a, **k): ...
-        async def aget(self, *a, **k): ...
-        async def aget_all(self, *a, **k): ...
-        async def aupdate(self, *a, **k): ...
-        async def adelete(self, *a, **k): ...
-        async def aforget_memory(self, *a, **k): ...
+        async def asetup(self):
+            pass
+
+        async def astore(self, *a, **k):
+            pass
+
+        async def asearch(self, *a, **k):
+            pass
+
+        async def aget(self, *a, **k):
+            pass
+
+        async def aget_all(self, *a, **k):
+            pass
+
+        async def aupdate(self, *a, **k):
+            pass
+
+        async def adelete(self, *a, **k):
+            pass
+
+        async def aforget_memory(self, *a, **k):
+            pass
 
     return _S()
 
