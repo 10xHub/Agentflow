@@ -1,5 +1,6 @@
 """Tests for the tool_node module."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -673,3 +674,80 @@ class TestToolNodeMCPUserInfo:
                 assert call_args[0][0] == "mcp_tool"  # name
                 assert call_args[0][1] == {"param": "value"}  # input_data
                 assert "meta" not in call_args[1]  # no meta kwarg
+
+
+class TestToolNodeRemoteToolParity:
+    """Regression tests for issue #148.
+
+    ``all_tools_sync`` used to rebuild the tool list from local + MCP tools only and
+    never appended ``remote_tools``, so remote (client-side) tools silently vanished
+    for any caller that went through the sync accessor.
+    """
+
+    @staticmethod
+    def _remote_tool(name: str) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"Remote tool {name}.",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        }
+
+    def test_all_tools_sync_includes_remote_tools(self):
+        """Remote tools must be advertised by the sync accessor."""
+
+        def local_func() -> str:
+            """Local function."""
+            return "local"
+
+        tool_node = ToolNode([local_func])
+        tool_node.set_remote_tool([self._remote_tool("write_file")])
+
+        names = [t["function"]["name"] for t in tool_node.all_tools_sync()]
+        assert "local_func" in names
+        assert "write_file" in names
+
+    def test_sync_and_async_tool_sets_match(self):
+        """The sync and async builders must not drift apart.
+
+        Deliberately a sync test: ``all_tools_sync`` uses ``asyncio.run`` internally
+        and cannot be called from inside a running event loop.
+        """
+
+        def local_func() -> str:
+            """Local function."""
+            return "local"
+
+        mcp_tool = {
+            "type": "function",
+            "function": {
+                "name": "mcp_tool",
+                "description": "MCP tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+        tool_node = ToolNode([local_func], client=MagicMock())
+        tool_node.set_remote_tool([self._remote_tool("write_file")])
+
+        with patch.object(tool_node, "_get_mcp_tool", new_callable=AsyncMock) as mock_mcp:
+            mock_mcp.return_value = [mcp_tool]
+
+            async_names = {t["function"]["name"] for t in asyncio.run(tool_node.all_tools())}
+            sync_names = {t["function"]["name"] for t in tool_node.all_tools_sync()}
+
+        assert sync_names == async_names
+        assert sync_names == {"local_func", "mcp_tool", "write_file"}
+
+    def test_all_tools_sync_without_remote_tools_is_unchanged(self):
+        """No remote tools registered means nothing extra is appended."""
+
+        def local_func() -> str:
+            """Local function."""
+            return "local"
+
+        tool_node = ToolNode([local_func])
+
+        assert [t["function"]["name"] for t in tool_node.all_tools_sync()] == ["local_func"]

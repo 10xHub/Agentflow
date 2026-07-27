@@ -12,6 +12,7 @@ from agentflow.core.state.summary_context_manager import SummaryContextManager
 
 # Agents
 from .agent import (
+    AudioAgent,
     BaseReranker,
     CohereReranker,
     CrossEncoderReranker,
@@ -44,6 +45,7 @@ from .tools import (
 
 __all__ = [
     # Agents
+    "AudioAgent",
     "BaseReranker",
     "CohereReranker",
     "CrossEncoderReranker",
