@@ -512,8 +512,15 @@ class CompiledGraph[StateT: AgentState]:
     ):
         """Attach remote tools to a ToolNode in the graph.
 
+        Remote tools are executed by the client, not the server. The graph only
+        advertises their schemas to the model and emits a ``RemoteToolCallBlock``
+        when one is called.
+
         Args:
-            tools: List of tool configurations to attach.
+            tools: List of tool schemas in OpenAI function-calling format. Each
+                entry must be ``{"type": "function", "function": {...}}`` with a
+                ``name`` inside ``function`` -- the name is read from there to
+                route calls back to the client.
             node_name: Name of the ToolNode to attach tools to.
 
         Raises:
@@ -521,8 +528,14 @@ class CompiledGraph[StateT: AgentState]:
 
         Example:
             >>> tool_configs = [
-            ...     {"name": "search", "type": "SearchTool", "config": {...}},
-            ...     {"name": "calculator", "type": "CalculatorTool", "config": {...}},
+            ...     {
+            ...         "type": "function",
+            ...         "function": {
+            ...             "name": "read_clipboard",
+            ...             "description": "Read the current clipboard text.",
+            ...             "parameters": {"type": "object", "properties": {}, "required": []},
+            ...         },
+            ...     }
             ... ]
             >>> graph.attach_remote_tools(tool_configs, "tool_node")
         """

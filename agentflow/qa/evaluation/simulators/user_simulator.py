@@ -228,9 +228,7 @@ class UserSimulator:
         # Each simulation gets its own thread_id so checkpointer state
         # doesn't bleed between concurrent or sequential runs.
         run_config = dict(config or {})
-        run_config.setdefault("configurable", {}).setdefault(
-            "thread_id", f"{scenario.scenario_id}-{uuid.uuid4().hex[:8]}"
-        )
+        run_config.setdefault("thread_id", f"{scenario.scenario_id}-{uuid.uuid4().hex[:8]}")
 
         try:
             # Start with the initial prompt

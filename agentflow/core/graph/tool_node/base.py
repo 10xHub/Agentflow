@@ -250,9 +250,9 @@ class ToolNode(
     ) -> list[dict]:
         """Synchronously get all available tools from all configured providers.
 
-        This is a synchronous wrapper around the async all_tools() method.
-        It uses asyncio.run() to handle async operations from MCP, Composio,
-        and LangChain adapters.
+        This is a synchronous wrapper around the async all_tools() method. It
+        returns the same set of tools -- local, MCP and remote -- and uses
+        asyncio.run() to handle the async MCP listing.
 
         Returns:
             List of tool definitions in OpenAI function calling format.
@@ -267,6 +267,10 @@ class ToolNode(
             result = asyncio.run(self._get_mcp_tool(tags=tags))
             if result:
                 tools.extend(result)
+
+        # Must mirror ``_all_tools_async``: dropping remote tools here makes
+        # client-side tools silently invisible to the model.
+        tools.extend(self.remote_tools)
 
         return tools
 
