@@ -32,6 +32,13 @@ class Level(enum.IntEnum):
     TWO = 2
 
 
+class Template(str, enum.Enum):
+    """Members that look like JSON, to catch over-eager decoding of raw arguments."""
+
+    EMPTY_OBJ = "{}"
+    EMPTY_ARR = "[]"
+
+
 class Address(BaseModel):
     city: str
     zip_code: str = Field(description="postal code")
@@ -350,6 +357,32 @@ class TestArgumentCoercion:
         payload = json.dumps({"city": "NYC", "zip_code": "10001"})
         out = self._prepare(save, {"address": payload})
         assert isinstance(out["address"], Address)
+
+    def test_json_looking_string_the_annotation_accepts_is_not_decoded(self):
+        """A value the declared type accepts must never be JSON-decoded out from under it.
+
+        Decoding every ``{``/``[`` string up front turned a legitimate enum member into
+        a dict and then rejected it, with a message that contradicted itself:
+        ``Input should be '{}'`` when the input *was* ``"{}"``.
+        """
+
+        def render(template: Template) -> str:
+            """Render."""
+            return ""
+
+        assert self._prepare(render, {"template": "{}"})["template"] is Template.EMPTY_OBJ
+        assert self._prepare(render, {"template": "[]"})["template"] is Template.EMPTY_ARR
+
+    def test_decode_fallback_reports_the_decoded_error(self):
+        """When a JSON string does decode, its validation error is the useful one."""
+
+        def save(address: Address) -> str:
+            """Save."""
+            return ""
+
+        with pytest.raises(TypeError) as exc:
+            self._prepare(save, {"address": json.dumps({"city": "NYC"})})
+        assert "zip_code" in str(exc.value)
 
     def test_already_correct_instance_passes_through(self):
         def save(address: Address) -> str:

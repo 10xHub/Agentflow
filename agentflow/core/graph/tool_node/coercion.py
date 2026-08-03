@@ -85,6 +85,10 @@ def _maybe_json(value: t.Any) -> t.Any:
     ``{"type": "string"}`` schema, hand-serialize nested objects into a single string.
     Only strings that clearly look like a JSON object or array are decoded, so an
     enum member such as ``"5"`` is never turned into an int.
+
+    This is a *fallback*, applied only after the raw value has already been rejected.
+    Decoding up front would corrupt any value the annotation would have accepted as
+    it stands, such as an enum member whose value is literally ``"{}"``.
     """
     if not isinstance(value, str):
         return value
@@ -95,6 +99,29 @@ def _maybe_json(value: t.Any) -> t.Any:
         return json.loads(stripped)
     except ValueError:
         return value
+
+
+def _validate(annotation: t.Any, value: t.Any) -> t.Any:
+    """Validate against the annotation, tolerating annotations the cache cannot key."""
+    try:
+        adapter = _adapter(annotation)
+    except TypeError:
+        # Unhashable annotation could not be cached; build the adapter directly.
+        adapter = TypeAdapter(annotation)
+    return adapter.validate_python(value)
+
+
+def _readable_error(
+    exc: ValidationError,
+    tool_name: str,
+    param_name: str,
+) -> TypeError:
+    """Flatten pydantic field errors into a message that can go back to the model."""
+    details = "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or param_name}: {err['msg']}"
+        for err in exc.errors()
+    )
+    return TypeError(f"Invalid argument {param_name!r} for tool {tool_name!r}: {details}")
 
 
 def coerce_tool_argument(
@@ -132,18 +159,19 @@ def coerce_tool_argument(
     if not needs:
         return value
 
-    candidate = _maybe_json(value)
-
     try:
-        return _adapter(annotation).validate_python(candidate)
-    except TypeError:
-        # Unhashable annotation could not be cached; build the adapter directly.
-        return TypeAdapter(annotation).validate_python(candidate)
-    except ValidationError as exc:
-        details = "; ".join(
-            f"{'.'.join(str(p) for p in err['loc']) or param_name}: {err['msg']}"
-            for err in exc.errors()
-        )
-        raise TypeError(
-            f"Invalid argument {param_name!r} for tool {tool_name!r}: {details}"
-        ) from exc
+        return _validate(annotation, value)
+    except ValidationError as raw_error:
+        # Only now consider that the model may have hand-serialized a nested object
+        # into a string. Trying this first would decode a value the annotation was
+        # willing to accept, and report a contradictory error about it.
+        decoded = _maybe_json(value)
+        if decoded is value:
+            raise _readable_error(raw_error, tool_name, param_name) from raw_error
+
+        try:
+            return _validate(annotation, decoded)
+        except ValidationError as decoded_error:
+            # The decoded payload is what the model meant, so its field errors are the
+            # actionable ones ("zip_code: Field required", not "expected a dict").
+            raise _readable_error(decoded_error, tool_name, param_name) from decoded_error

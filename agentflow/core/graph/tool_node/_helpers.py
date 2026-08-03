@@ -16,6 +16,33 @@ _STATUS_FAIL: set[str] = {"failed", "failure", "error", "false", "0"}
 _ERROR_TRUE: set[str] = {"true", "1", "yes", "error", "failed", "failure"}
 
 
+def _stable_members(obj: set | frozenset) -> list:
+    """Order a set so the same result serializes identically on every run.
+
+    Set iteration order is not stable across processes, which would make tool output
+    flap between runs and tests flaky.
+    """
+    try:
+        return sorted(obj)
+    except TypeError:
+        # Mixed or uncomparable members: order is unavoidably arbitrary here, but
+        # losing the values entirely would be worse.
+        return list(obj)
+
+
+# Rendering rules for the scalar types a tool can return but JSON cannot hold. Ordered:
+# the first matching entry wins. Decimal renders as str, not float, so a money value
+# does not lose precision on the way to the model.
+_JSON_ENCODERS: tuple[tuple[t.Any, t.Callable[[t.Any], t.Any]], ...] = (
+    ((dt.datetime, dt.date, dt.time), lambda o: o.isoformat()),
+    ((uuid.UUID, pathlib.PurePath), str),
+    (decimal.Decimal, str),
+    (enum.Enum, lambda o: o.value),
+    ((set, frozenset), _stable_members),
+    ((bytes, bytearray), lambda o: o.decode("utf-8", errors="replace")),
+)
+
+
 def _json_default(obj: t.Any) -> t.Any:
     """Render the scalar types a tool can return but JSON cannot hold.
 
@@ -28,19 +55,9 @@ def _json_default(obj: t.Any) -> t.Any:
             through to its existing repr fallback. Unknown objects must not be silently
             stringified here, or a genuinely unserializable payload would look clean.
     """
-    if isinstance(obj, dt.datetime | dt.date | dt.time):
-        return obj.isoformat()
-    if isinstance(obj, uuid.UUID | pathlib.PurePath):
-        return str(obj)
-    if isinstance(obj, decimal.Decimal):
-        # str, not float: a money value must not lose precision on the way to the model.
-        return str(obj)
-    if isinstance(obj, enum.Enum):
-        return obj.value
-    if isinstance(obj, set | frozenset):
-        return list(obj)
-    if isinstance(obj, bytes | bytearray):
-        return obj.decode("utf-8", errors="replace")
+    for types_, encode in _JSON_ENCODERS:
+        if isinstance(obj, types_):
+            return encode(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 

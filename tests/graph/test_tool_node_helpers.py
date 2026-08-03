@@ -95,9 +95,15 @@ class TestSafeSerializeScalarFormatting:
         out = _safe_serialize({"rows": [{"when": datetime(2026, 1, 15, 9, 30)}]})
         assert out == {"rows": [{"when": "2026-01-15T09:30:00"}]}
 
-    def test_sets_become_lists(self):
-        out = _safe_serialize({"tags": {"a"}})
-        assert out == {"tags": ["a"]}
+    def test_sets_become_sorted_lists(self):
+        """Set iteration order is not stable, so unordered output would flap per run."""
+        out = _safe_serialize({"tags": {"c", "a", "b"}})
+        assert out == {"tags": ["a", "b", "c"]}
+
+    def test_set_of_uncomparable_values_still_serializes(self):
+        """Sorting is best-effort; mixed types must not crash the whole result."""
+        out = _safe_serialize({"tags": {1, "a"}})
+        assert sorted(map(str, out["tags"])) == ["1", "a"]
 
     def test_plain_json_values_are_untouched(self):
         payload = {"a": 1, "b": "x", "c": [1, 2], "d": None, "e": True}
