@@ -218,6 +218,8 @@ max-complexity = 10
 "agentflow/adapters/llm/openai_responses_converter.py" = ["PLR0912", "PLR0915"]
 "agentflow/graph/agent.py" = ["PLR0912", "PLR0913"]
 "agentflow/runtime/publisher/otel_publisher.py" = ["PLR0912"]
+# Type dispatchers: one return per supported annotation reads better as a flat table.
+"agentflow/core/graph/tool_node/schema.py" = ["PLR0911"]
 "agentflow/qa/evaluation/reporters/_html_css.py" = ["E501"]
 "agentflow/qa/evaluation/reporters/_html_js.py" = ["E501"]
 "agentflow/qa/evaluation/reporters/_html_template.py" = ["E501", "PLR0913"]

@@ -132,12 +132,13 @@ class TestToolNode:
         """Test annotation to schema conversion for complex types."""
         from typing import Literal
 
+        # A nested item schema must not inherit the parameter's default, and a null
+        # default is dropped entirely since `required` already conveys optionality.
         schema = ToolNode._annotation_to_schema(list[str], None)
-        expected = {"type": "array", "items": {"type": "string", "default": None}, "default": None}
-        assert schema == expected
+        assert schema == {"type": "array", "items": {"type": "string"}}
 
         schema = ToolNode._annotation_to_schema(Literal["a", "b", "c"], None)
-        assert schema == {"type": "string", "enum": ["a", "b", "c"], "default": None}
+        assert schema == {"type": "string", "enum": ["a", "b", "c"]}
 
     @pytest.mark.asyncio
     async def test_invoke_local_tool_success(self):

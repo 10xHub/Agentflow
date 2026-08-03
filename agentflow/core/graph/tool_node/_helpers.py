@@ -2,13 +2,63 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import decimal
+import enum
 import json
+import pathlib
 import typing as t
+import uuid
 
 
 _STATUS_OK: set[str] = {"completed", "success", "ok", "done", "true", "1"}
 _STATUS_FAIL: set[str] = {"failed", "failure", "error", "false", "0"}
 _ERROR_TRUE: set[str] = {"true", "1", "yes", "error", "failed", "failure"}
+
+
+def _stable_members(obj: set | frozenset) -> list:
+    """Order a set so the same result serializes identically on every run.
+
+    Set iteration order is not stable across processes, which would make tool output
+    flap between runs and tests flaky.
+    """
+    try:
+        return sorted(obj)
+    except TypeError:
+        # Mixed or uncomparable members: order is unavoidably arbitrary here, but
+        # losing the values entirely would be worse.
+        return list(obj)
+
+
+# Rendering rules for the scalar types a tool can return but JSON cannot hold. Ordered:
+# the first matching entry wins. Decimal renders as str, not float, so a money value
+# does not lose precision on the way to the model.
+_JSON_ENCODERS: tuple[tuple[t.Any, t.Callable[[t.Any], t.Any]], ...] = (
+    ((dt.datetime, dt.date, dt.time), lambda o: o.isoformat()),
+    ((uuid.UUID, pathlib.PurePath), str),
+    (decimal.Decimal, str),
+    (enum.Enum, lambda o: o.value),
+    ((set, frozenset), _stable_members),
+    ((bytes, bytearray), lambda o: o.decode("utf-8", errors="replace")),
+)
+
+
+def _json_default(obj: t.Any) -> t.Any:
+    """Render the scalar types a tool can return but JSON cannot hold.
+
+    Mirrors the scalars ``schema.py`` accepts on the way in, so a value the model sent
+    as ``"2026-01-15T09:30:00"`` comes back in that same textual form rather than as a
+    Python repr.
+
+    Raises:
+        TypeError: For anything else, so ``json.dumps`` propagates and the caller falls
+            through to its existing repr fallback. Unknown objects must not be silently
+            stringified here, or a genuinely unserializable payload would look clean.
+    """
+    for types_, encode in _JSON_ENCODERS:
+        if isinstance(obj, types_):
+            return encode(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def _safe_serialize(obj: t.Any) -> dict[str, t.Any]:
@@ -24,7 +74,15 @@ def _safe_serialize(obj: t.Any) -> dict[str, t.Any]:
                     resource["uri"] = str(resource["uri"])
                     dumped["resource"] = resource
             return dumped
-        return {"content": str(obj), "type": "fallback"}
+
+        # Retry with the scalar renderer so a container keeps its shape and only the
+        # offending leaves become text. Without this a single datetime collapses the
+        # whole return value into one repr string.
+        try:
+            normalized = json.loads(json.dumps(obj, default=_json_default))
+        except (TypeError, OverflowError, ValueError):
+            return {"content": str(obj), "type": "fallback"}
+        return normalized if isinstance(normalized, dict) else {"content": normalized}
 
 
 def _as_bool(val: t.Any, truthy_set: set[str]) -> bool:
