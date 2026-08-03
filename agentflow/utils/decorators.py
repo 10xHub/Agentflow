@@ -28,6 +28,7 @@ def tool[F: Callable[..., Any]](
     provider: str | None = None,
     capabilities: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
+    parameters: dict[str, Any] | None = None,
 ) -> Callable[[F], F] | F:
     """Decorator to mark a function as a tool with metadata.
 
@@ -58,6 +59,11 @@ def tool[F: Callable[..., Any]](
             Examples: ["read_files", "network_access", "database_write"].
         metadata: Additional arbitrary metadata to attach to the tool. This can
             include custom fields specific to your application or workflow.
+        parameters: An explicit JSON Schema for the tool's parameters. When provided,
+            automatic schema generation is skipped and this dict is forwarded to the
+            provider verbatim. Use it for parameter types the generator rejects, or
+            when a specific provider needs a hand-tuned schema. Argument coercion
+            still runs off the real annotations, so keep the two in agreement.
 
     Returns:
         A decorator function that wraps the target function and attaches metadata
@@ -101,6 +107,7 @@ def tool[F: Callable[..., Any]](
           - _py_tool_provider: The provider string
           - _py_tool_capabilities: List of capabilities
           - _py_tool_metadata: Additional metadata dict
+          - _py_tool_parameters: Explicit parameters JSON Schema, if supplied
         - These attributes are used by ToolNode and schema generation to build
           OpenAI-compatible function calling schemas.
         - Tags are converted to a set for efficient membership testing.
@@ -151,6 +158,13 @@ def tool[F: Callable[..., Any]](
         if metadata is not None:
             func._py_tool_metadata = metadata  # type: ignore[attr-defined]
 
+        # Explicit parameters schema bypasses automatic schema generation entirely
+        if parameters is not None:
+            if not isinstance(parameters, dict):
+                msg = f"@tool(parameters=...) must be a JSON Schema dict, got {type(parameters)}"
+                raise ValueError(msg)
+            func._py_tool_parameters = parameters  # type: ignore[attr-defined]
+
         return func
 
     # Handle being called without parentheses (@tool)
@@ -178,6 +192,7 @@ def get_tool_metadata(func: Callable) -> dict[str, Any]:
         - provider: The provider string (or None if not set)
         - capabilities: List of capabilities (or None if not set)
         - metadata: Additional metadata dict (or None if not set)
+        - parameters: Explicit parameters JSON Schema (or None if not set)
 
     Example:
         >>> @tool(name="my_tool", tags=["test"])
@@ -197,6 +212,7 @@ def get_tool_metadata(func: Callable) -> dict[str, Any]:
         "provider": getattr(func, "_py_tool_provider", None),
         "capabilities": getattr(func, "_py_tool_capabilities", None),
         "metadata": getattr(func, "_py_tool_metadata", None),
+        "parameters": getattr(func, "_py_tool_parameters", None),
     }
 
 

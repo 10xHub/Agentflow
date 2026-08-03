@@ -2,13 +2,46 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import decimal
+import enum
 import json
+import pathlib
 import typing as t
+import uuid
 
 
 _STATUS_OK: set[str] = {"completed", "success", "ok", "done", "true", "1"}
 _STATUS_FAIL: set[str] = {"failed", "failure", "error", "false", "0"}
 _ERROR_TRUE: set[str] = {"true", "1", "yes", "error", "failed", "failure"}
+
+
+def _json_default(obj: t.Any) -> t.Any:
+    """Render the scalar types a tool can return but JSON cannot hold.
+
+    Mirrors the scalars ``schema.py`` accepts on the way in, so a value the model sent
+    as ``"2026-01-15T09:30:00"`` comes back in that same textual form rather than as a
+    Python repr.
+
+    Raises:
+        TypeError: For anything else, so ``json.dumps`` propagates and the caller falls
+            through to its existing repr fallback. Unknown objects must not be silently
+            stringified here, or a genuinely unserializable payload would look clean.
+    """
+    if isinstance(obj, dt.datetime | dt.date | dt.time):
+        return obj.isoformat()
+    if isinstance(obj, uuid.UUID | pathlib.PurePath):
+        return str(obj)
+    if isinstance(obj, decimal.Decimal):
+        # str, not float: a money value must not lose precision on the way to the model.
+        return str(obj)
+    if isinstance(obj, enum.Enum):
+        return obj.value
+    if isinstance(obj, set | frozenset):
+        return list(obj)
+    if isinstance(obj, bytes | bytearray):
+        return obj.decode("utf-8", errors="replace")
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def _safe_serialize(obj: t.Any) -> dict[str, t.Any]:
@@ -24,7 +57,15 @@ def _safe_serialize(obj: t.Any) -> dict[str, t.Any]:
                     resource["uri"] = str(resource["uri"])
                     dumped["resource"] = resource
             return dumped
-        return {"content": str(obj), "type": "fallback"}
+
+        # Retry with the scalar renderer so a container keeps its shape and only the
+        # offending leaves become text. Without this a single datetime collapses the
+        # whole return value into one repr string.
+        try:
+            normalized = json.loads(json.dumps(obj, default=_json_default))
+        except (TypeError, OverflowError, ValueError):
+            return {"content": str(obj), "type": "fallback"}
+        return normalized if isinstance(normalized, dict) else {"content": normalized}
 
 
 def _as_bool(val: t.Any, truthy_set: set[str]) -> bool:

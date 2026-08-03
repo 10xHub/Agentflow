@@ -19,7 +19,9 @@ from agentflow.runtime.publisher.publish import publish_event
 from agentflow.utils import CallbackContext, CallbackManager, InvocationType, call_sync_or_async
 
 from ._helpers import _extract_block_meta, _safe_serialize
+from .coercion import coerce_tool_argument
 from .constants import INJECTABLE_PARAMS, has_injected_default
+from .schema import _safe_type_hints
 
 
 if t.TYPE_CHECKING:
@@ -39,6 +41,7 @@ class LocalExecMixin:
         default_data: dict,
     ) -> dict:
         sig = inspect.signature(fn)
+        hints = _safe_type_hints(fn)
         input_data = {}
         for param_name, param in sig.parameters.items():
             if param.kind in (
@@ -62,7 +65,14 @@ class LocalExecMixin:
                 continue
 
             if param_name in args:
-                input_data[param_name] = args[param_name]
+                # The provider returns plain JSON, so a model/dataclass/enum parameter
+                # arrives as a dict or str and must be validated into its real type.
+                input_data[param_name] = coerce_tool_argument(
+                    args[param_name],
+                    hints.get(param_name, param.annotation),
+                    tool_name=name,
+                    param_name=param_name,
+                )
             elif param.default is inspect.Parameter.empty:
                 raise TypeError(f"Missing required parameter '{param_name}' for function '{name}'")
 
