@@ -466,7 +466,8 @@ Found a vulnerability? Please do not open a public issue. Follow the disclosure 
 
 ## 📄 License
 
-MIT License. See [LICENSE](https://github.com/10xHub/agentflow/blob/main/agentflow/LICENSE).
+Agentflow is [MIT licensed](https://github.com/10xHub/agentflow/blob/main/LICENSE) and made by
+[10xScale](https://10xscale.ai). Contributions are accepted under the same license.
 
 ---
 

@@ -111,5 +111,5 @@ dependency. See `agentflow/core/llm/client_factory.py` for the pattern.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the
-project's [MIT License](LICENSE).
+Agentflow is [MIT licensed](LICENSE) and made by [10xScale](https://10xscale.ai). Contributions
+are accepted under the same license.
