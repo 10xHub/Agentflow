@@ -109,11 +109,29 @@ message conversion, and tool integration. Key constructor params:
 `retry_config` (default True), `fallback_models`, `multimodal_config`, `output_schema`.
 
 **Model strings and providers.** `detect_provider(model)` infers the provider from a
-`"provider/model"` prefix or the model name. **It only resolves to `"google"` or `"openai"`.**
-Examples: `"gemini/gemini-2.5-flash"`, `"openai/gpt-4o"`, `"gpt-4o-mini"`. Vertex AI is selected
-via `use_vertex_ai=True`. There is **no native Anthropic client** in the LLM factory despite
-Anthropic/Claude appearing in marketing copy; Claude is reachable only via an OpenAI-compatible
-endpoint or the custom-functions approach. Verify before promising native Claude support.
+`"provider/model"` prefix or the model name, and resolves to `"google"`, `"openai"`, or
+`"anthropic"`. Examples: `"gemini/gemini-2.5-flash"`, `"openai/gpt-4o"`, `"gpt-4o-mini"`,
+`"claude-opus-5"`, `"anthropic/claude-sonnet-5"`. Google's Vertex AI is selected via
+`use_vertex_ai=True`.
+
+Anthropic has three backends, so a boolean flag cannot express them; the selector is the
+string `anthropic_backend`: `None` (direct Claude API, the default), `"vertex"`
+(`AsyncAnthropicVertex`), or `"bedrock"` (`AsyncAnthropicBedrockMantle`, the Messages-API
+endpoint, not the legacy `InvokeModel` client). Bedrock model ids keep their `anthropic.`
+prefix (`"anthropic.claude-opus-5"`); it is preserved, not stripped. Install with the
+`[anthropic]`, `[anthropic-vertex]`, or `[anthropic-bedrock]` extra.
+
+Anthropic-specific request behaviour, all handled by the provider and not the caller:
+`max_tokens` is required and defaulted (16000 non-streaming, 64000 streaming);
+`temperature`/`top_p`/`top_k` are stripped for models that reject them with a 400;
+`reasoning_config={"effort": ...}` maps to `thinking={"type": "adaptive"}` plus
+`output_config.effort`, and `budget_tokens` is never emitted; a trailing assistant turn is
+dropped because prefill 400s on current models. `output_type` is limited to `text` and
+`json`: the Messages API has no image/audio/video generation endpoint.
+
+Note the SDK is capped at `anthropic>=1.0.0,<2`. The 1.0 release moved to **httpx2**, so an
+`http_client` passed through `llm_kwargs` on the Anthropic path must be an httpx2 client,
+while the OpenAI path still takes httpx.
 
 **ToolNode.** `ToolNode(tools, client=None, pass_user_info_to_mcp=False)`. First positional arg
 is `tools` (an iterable of callables). `client` is an MCP client (fastmcp/mcp). Tools run in

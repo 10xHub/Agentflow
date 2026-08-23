@@ -108,6 +108,11 @@ build-backend = "setuptools.build_meta"
 google-genai = ["google-genai>=1.56.0"]
 realtime = ["google-genai>=1.56.0"]
 openai = ["openai>=1.77.0"]
+# Capped at <2: the SDK went 0.x -> 1.0.0 (httpx2, awaited async raw responses),
+# so an uncapped lower bound would pull a future major automatically.
+anthropic = ["anthropic>=1.0.0,<2"]
+anthropic-vertex = ["anthropic[vertex]>=1.0.0,<2"]
+anthropic-bedrock = ["anthropic[bedrock]>=1.0.0,<2"]
 pg_checkpoint = ["asyncpg>=0.29.0","redis>=4.2"]
 sqlite_checkpoint = ["aiosqlite>=0.19.0"]
 mcp = ["fastmcp>=2.11.3","mcp>=1.13.0"]

@@ -284,7 +284,13 @@ class TestDetectProviderFromModel:
     def test_unknown_prefix_falls_back_to_openai(self):
         agent = _make_openai_agent()
         assert agent._detect_provider_from_model("ollama/llama3") == "openai"
-        assert agent._detect_provider_from_model("anthropic/claude-3") == "openai"
+
+    def test_anthropic_prefix_is_now_recognised(self):
+        """``anthropic``/``claude`` became real prefixes when the native
+        Anthropic provider landed; they no longer fall through to openai."""
+        agent = _make_openai_agent()
+        assert agent._detect_provider_from_model("anthropic/claude-opus-5") == "anthropic"
+        assert agent._detect_provider_from_model("claude-opus-5") == "anthropic"
 
 
 class TestResolveProviderAndModel:
@@ -2027,12 +2033,22 @@ class TestAgentInit:
         assert agent.provider == "openai"
         assert agent.model == "meta-llama/Llama-3-70b"
 
-    def test_anthropic_prefix_resolves_to_openai(self):
-        """Claude via an OpenAI-compatible endpoint should not select google."""
+    def test_anthropic_prefix_resolves_to_anthropic(self):
+        """``anthropic/`` is a recognised prefix now, so it selects the native
+        provider and is stripped from the model name."""
         with patch.object(Agent, "_create_client", return_value=MagicMock()):
-            agent = Agent(model="anthropic/claude-3", reasoning_config=None)
+            agent = Agent(model="anthropic/claude-opus-5", reasoning_config=None)
+        assert agent.provider == "anthropic"
+        assert agent.model == "claude-opus-5"
+
+    def test_explicit_provider_still_routes_claude_through_openai(self):
+        """Escape hatch for Claude behind an OpenAI-compatible proxy, which is
+        what ``anthropic/...`` used to do implicitly before the native provider."""
+        with patch.object(Agent, "_create_client", return_value=MagicMock()):
+            agent = Agent(
+                model="anthropic/claude-3", provider="openai", reasoning_config=None
+            )
         assert agent.provider == "openai"
-        assert agent.model == "anthropic/claude-3"
 
     def test_ollama_prefix_resolves_to_openai(self):
         with patch.object(Agent, "_create_client", return_value=MagicMock()):

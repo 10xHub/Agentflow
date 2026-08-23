@@ -62,6 +62,29 @@ CALL_EXCLUDED_KWARGS = CLIENT_CONSTRUCTOR_KWARGS | frozenset(
 VALID_OUTPUT_TYPES = ("text", "image", "video", "audio", "json")
 GOOGLE_OUTPUT_TYPES = ("text", "image", "video", "audio", "json")
 OPENAI_OUTPUT_TYPES = ("text", "image", "audio", "json")
+# Anthropic's Messages API generates text and tool calls only. Structured output
+# is text constrained by a JSON schema, so "json" is supported; there is no
+# image/audio/video generation endpoint.
+ANTHROPIC_OUTPUT_TYPES = ("text", "json")
+
+# Models that reject temperature / top_p / top_k with a 400. Sampling params are
+# stripped for these before the request is sent. Older Claude models still accept
+# them, so this is a per-model set rather than a blanket strip.
+ANTHROPIC_NO_SAMPLING_MODELS = frozenset(
+    {
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-sonnet-5",
+    }
+)
+
+# Anthropic requires max_tokens on every request. Streaming gets a larger default:
+# a large max_tokens without streaming risks an HTTP timeout.
+ANTHROPIC_DEFAULT_MAX_TOKENS = 16000
+ANTHROPIC_DEFAULT_MAX_TOKENS_STREAMING = 64000
 
 GOOGLE_THINKING_BUDGET_BY_EFFORT = {
     "low": 512,

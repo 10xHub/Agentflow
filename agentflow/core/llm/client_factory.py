@@ -85,6 +85,8 @@ _PROVIDER_PREFIXES = {
     "google": "google",
     "openai": "openai",
     "gpt": "openai",
+    "anthropic": "anthropic",
+    "claude": "anthropic",
 }
 
 # Keys allowed in the AsyncOpenAI constructor but NOT in per-request calls.
@@ -100,6 +102,40 @@ _CLIENT_CONSTRUCTOR_KWARGS = frozenset(
     }
 )
 
+# Anthropic's constructors do not accept ``organization`` / ``project``, so the
+# OpenAI-shaped allowlist above cannot be reused. ``http_client`` here must be an
+# httpx2 client: the anthropic SDK moved to httpx2 in 1.0, while the OpenAI SDK
+# still uses httpx. Passing the wrong one fails at request time.
+_ANTHROPIC_CONSTRUCTOR_KWARGS = frozenset(
+    {
+        "timeout",
+        "max_retries",
+        "default_headers",
+        "default_query",
+        "http_client",
+        "auth_token",
+        "middleware",
+    }
+)
+_ANTHROPIC_VERTEX_CONSTRUCTOR_KWARGS = _ANTHROPIC_CONSTRUCTOR_KWARGS | frozenset(
+    {
+        "region",
+        "project_id",
+        "access_token",
+        "credentials",
+    }
+)
+_ANTHROPIC_BEDROCK_CONSTRUCTOR_KWARGS = _ANTHROPIC_CONSTRUCTOR_KWARGS | frozenset(
+    {
+        "aws_access_key",
+        "aws_secret_key",
+        "aws_session_token",
+        "aws_region",
+        "aws_profile",
+        "api_key",
+    }
+)
+
 
 def detect_provider(model: str, use_vertex_ai: bool = False) -> str:
     """Infer the provider from a model name.
@@ -107,20 +143,29 @@ def detect_provider(model: str, use_vertex_ai: bool = False) -> str:
     Args:
         model: Model identifier, optionally prefixed with ``"provider/"``
             (e.g. ``"gemini/gemini-2.5-flash"``, ``"openai/gpt-4o"``).
-        use_vertex_ai: When True, always returns ``"google"`` regardless of model.
+        use_vertex_ai: When True, selects ``"google"`` unless the model is
+            clearly a Claude model. Claude runs on Vertex too, so the flag acts
+            as a backend selector there rather than a provider override.
 
     Returns:
-        One of ``"google"`` or ``"openai"``.
+        One of ``"google"``, ``"openai"``, or ``"anthropic"``.
     """
-    if use_vertex_ai:
-        return "google"
-
     if "/" in model:
         prefix = model.split("/", 1)[0].lower()
         if prefix in _PROVIDER_PREFIXES:
             return _PROVIDER_PREFIXES[prefix]
         # Unknown prefix — fall through to name-based detection using the suffix
         model = model.split("/", 1)[1]
+
+    # Checked before the use_vertex_ai short-circuit: Claude runs on Vertex too,
+    # and use_vertex_ai is the flag a caller naturally reaches for. Letting the
+    # flag force "google" here would build a Google client for a Claude model and
+    # fail at request time with a confusing error.
+    if model.lower().startswith(("claude-", "anthropic.")):
+        return "anthropic"
+
+    if use_vertex_ai:
+        return "google"
 
     lower = model.lower()
     if lower.startswith(("gemini-", "imagen-", "veo-", "chirp")):
@@ -148,11 +193,12 @@ def resolve_provider_and_model(model: str, use_vertex_ai: bool = False) -> tuple
 
     Args:
         model: Model identifier, optionally prefixed with ``"provider/"``.
-        use_vertex_ai: When True, always selects the ``"google"`` provider.
+        use_vertex_ai: When True, selects ``"google"`` unless the model is
+            clearly a Claude model (see :func:`detect_provider`).
 
     Returns:
-        A ``(provider, model)`` tuple where provider is ``"google"`` or
-        ``"openai"``.
+        A ``(provider, model)`` tuple where provider is ``"google"``,
+        ``"openai"``, or ``"anthropic"``.
     """
     if "/" in model:
         prefix, rest = model.split("/", 1)
@@ -168,16 +214,20 @@ def create_llm_client(
     use_vertex_ai: bool = False,
     base_url: str | None = None,
     api_key: str | None = None,
+    anthropic_backend: str | None = None,
     **extra_kwargs: Any,
 ) -> Any:
     """Create a native async SDK client for the given provider.
 
     Args:
-        provider: ``"google"`` or ``"openai"``.
+        provider: ``"google"``, ``"openai"``, or ``"anthropic"``.
         use_vertex_ai: When True and provider is ``"google"``, creates a
             Vertex AI client using ``GOOGLE_CLOUD_PROJECT`` / ``GOOGLE_CLOUD_LOCATION``.
+            Google-specific; use ``anthropic_backend`` for Anthropic on Vertex.
         base_url: Custom base URL for OpenAI-compatible APIs (ollama, vllm, …).
         api_key: Explicit API key. Falls back to env vars when omitted.
+        anthropic_backend: Backend selector for the Anthropic provider.
+            ``None`` (direct Claude API), ``"vertex"``, or ``"bedrock"``.
         **extra_kwargs: Forwarded to the AsyncOpenAI constructor
             (only recognised constructor keys are passed through).
 
@@ -198,7 +248,17 @@ def create_llm_client(
             **extra_kwargs,
         )
 
-    raise ValueError(f"Unsupported provider: '{provider}'. Supported: 'google', 'openai'.")
+    if provider == "anthropic":
+        return _create_anthropic_client(
+            base_url=base_url,
+            api_key=api_key,
+            anthropic_backend=anthropic_backend,
+            **extra_kwargs,
+        )
+
+    raise ValueError(
+        f"Unsupported provider: '{provider}'. Supported: 'google', 'openai', 'anthropic'."
+    )
 
 
 def _create_google_client(*, use_vertex_ai: bool) -> Any:
@@ -271,3 +331,103 @@ def _create_openai_client(
         return AsyncOpenAI(api_key=resolved_key, base_url=base_url, **client_kwargs)
 
     return AsyncOpenAI(api_key=resolved_key, **client_kwargs)
+
+
+def _create_anthropic_client(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    anthropic_backend: str | None = None,
+    **extra_kwargs: Any,
+) -> Any:
+    """Create an async Anthropic client for the selected backend.
+
+    Anthropic reaches three distinct backends, so unlike Google's boolean
+    ``use_vertex_ai`` flag the selector is a string:
+
+    * ``None``      -> ``AsyncAnthropic``              (direct Claude API)
+    * ``"vertex"``  -> ``AsyncAnthropicVertex``        (Google Cloud Vertex AI)
+    * ``"bedrock"`` -> ``AsyncAnthropicBedrockMantle`` (Amazon Bedrock)
+
+    ``AsyncAnthropicBedrockMantle`` is the Messages-API Bedrock endpoint. The
+    plain ``AsyncAnthropicBedrock`` client is the legacy ``InvokeModel`` path and
+    is deliberately not used here.
+
+    Region, project, and AWS credentials are resolved by the SDK from the
+    environment unless passed explicitly through ``llm_kwargs``.
+    """
+    backend = (anthropic_backend or "").lower() or None
+
+    if backend not in (None, "vertex", "bedrock"):
+        raise ValueError(
+            f"Unsupported anthropic_backend: '{anthropic_backend}'. "
+            "Supported: None (direct API), 'vertex', 'bedrock'."
+        )
+
+    if backend == "vertex":
+        try:
+            from anthropic import AsyncAnthropicVertex
+        except ImportError as exc:
+            raise ImportError(
+                "anthropic SDK with Vertex support is required for "
+                "anthropic_backend='vertex'. Install it with: "
+                'pip install "10xscale-agentflow[anthropic-vertex]"'
+            ) from exc
+
+        client_kwargs = {
+            k: v for k, v in extra_kwargs.items() if k in _ANTHROPIC_VERTEX_CONSTRUCTOR_KWARGS
+        }
+        client_kwargs.setdefault("timeout", get_default_llm_timeout())
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        logger.info("Creating Anthropic client (Vertex AI)")
+        return AsyncAnthropicVertex(**client_kwargs)
+
+    if backend == "bedrock":
+        try:
+            from anthropic import AsyncAnthropicBedrockMantle
+        except ImportError as exc:
+            raise ImportError(
+                "anthropic SDK with Bedrock support is required for "
+                "anthropic_backend='bedrock'. Install it with: "
+                'pip install "10xscale-agentflow[anthropic-bedrock]"'
+            ) from exc
+
+        client_kwargs = {
+            k: v for k, v in extra_kwargs.items() if k in _ANTHROPIC_BEDROCK_CONSTRUCTOR_KWARGS
+        }
+        client_kwargs.setdefault("timeout", get_default_llm_timeout())
+        if api_key and "api_key" not in client_kwargs:
+            client_kwargs["api_key"] = api_key
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        logger.info("Creating Anthropic client (Bedrock Mantle)")
+        return AsyncAnthropicBedrockMantle(**client_kwargs)
+
+    try:
+        from anthropic import AsyncAnthropic
+    except ImportError as exc:
+        raise ImportError(
+            "anthropic SDK is required for the Anthropic provider. "
+            'Install it with: pip install "10xscale-agentflow[anthropic]"'
+        ) from exc
+
+    resolved_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+    if not resolved_key:
+        # Not fatal: the SDK also resolves ANTHROPIC_AUTH_TOKEN, an `ant auth
+        # login` profile, or Workload Identity Federation. An unset API key does
+        # not mean there are no credentials.
+        logger.info(
+            "ANTHROPIC_API_KEY not set. Falling back to the SDK's own credential "
+            "resolution (ANTHROPIC_AUTH_TOKEN, auth profile, or federation)."
+        )
+
+    client_kwargs = {k: v for k, v in extra_kwargs.items() if k in _ANTHROPIC_CONSTRUCTOR_KWARGS}
+    client_kwargs.setdefault("timeout", get_default_llm_timeout())
+    if resolved_key:
+        client_kwargs["api_key"] = resolved_key
+    if base_url:
+        logger.info("Creating Anthropic client with custom base_url: %s", base_url)
+        client_kwargs["base_url"] = base_url
+
+    return AsyncAnthropic(**client_kwargs)

@@ -14,6 +14,7 @@ from agentflow.core.skills.models import SkillConfig
 from agentflow.core.state.message import Message
 from agentflow.storage.media.config import MultimodalConfig
 
+from .agent_internal.anthropic import AgentAnthropicMixin
 from .agent_internal.constants import DEFAULT_RETRY_CONFIG, REASONING_DEFAULT, RetryConfig
 from .agent_internal.execution import AgentExecutionMixin
 from .agent_internal.google import AgentGoogleMixin
@@ -32,6 +33,7 @@ logger = logging.getLogger("agentflow.agent")
 
 class Agent(
     AgentExecutionMixin,
+    AgentAnthropicMixin,
     AgentGoogleMixin,
     AgentOpenAIMixin,
     AgentProviderMixin,
