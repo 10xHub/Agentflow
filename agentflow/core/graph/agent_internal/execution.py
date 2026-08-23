@@ -579,6 +579,12 @@ class AgentExecutionMixin:
         Returns:
             The input token count.
 
+        Note:
+            Coverage differs by provider. Anthropic's endpoint counts messages,
+            the system prompt, and tool schemas. Google's counts ``contents``
+            only, since its endpoint takes no system instruction or tools, so
+            the total is lower than what the request will actually bill.
+
         Raises:
             NotImplementedError: If the active provider exposes no server-side
                 token counting endpoint.
@@ -586,12 +592,15 @@ class AgentExecutionMixin:
         if self.provider == "anthropic":
             return await self._count_tokens_anthropic(messages, tools, **kwargs)
 
+        if self.provider == "google":
+            return await self._count_tokens_google(messages, tools, **kwargs)
+
         raise NotImplementedError(
             f"Provider '{self.provider}' has no server-side token counting "
-            "endpoint, so an exact count is not available. Only 'anthropic' "
-            "supports Agent.count_tokens() today. Read usage from the response "
-            "after the call instead, or count client-side with the tokenizer "
-            "matching your model."
+            "endpoint, so an exact count is not available. 'anthropic' and "
+            "'google' support Agent.count_tokens(); OpenAI does not expose one. "
+            "Read usage from the response after the call instead, or count "
+            "client-side with the tokenizer matching your model."
         )
 
     async def execute(

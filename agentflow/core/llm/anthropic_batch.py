@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentflow.core.llm.batch_common import BatchResult
 from agentflow.core.llm.client_factory import create_llm_client
 
 
@@ -36,25 +37,6 @@ DEFAULT_MAX_TOKENS = 16000
 logger = logging.getLogger("agentflow.llm.anthropic_batch")
 
 _TERMINAL_STATUS = "ended"
-
-
-@dataclass
-class BatchResult:
-    """One entry from a completed batch."""
-
-    custom_id: str
-    status: str
-    """``succeeded``, ``errored``, ``canceled``, or ``expired``."""
-    text: str = ""
-    stop_reason: str | None = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    error: Any = None
-    raw: Any = None
-
-    @property
-    def ok(self) -> bool:
-        return self.status == "succeeded"
 
 
 @dataclass
