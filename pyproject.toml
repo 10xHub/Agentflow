@@ -108,6 +108,11 @@ build-backend = "setuptools.build_meta"
 google-genai = ["google-genai>=1.56.0"]
 realtime = ["google-genai>=1.56.0"]
 openai = ["openai>=1.77.0"]
+# Capped at <2: the SDK went 0.x -> 1.0.0 (httpx2, awaited async raw responses),
+# so an uncapped lower bound would pull a future major automatically.
+anthropic = ["anthropic>=1.0.0,<2"]
+anthropic-vertex = ["anthropic[vertex]>=1.0.0,<2"]
+anthropic-bedrock = ["anthropic[bedrock]>=1.0.0,<2"]
 pg_checkpoint = ["asyncpg>=0.29.0","redis>=4.2"]
 sqlite_checkpoint = ["aiosqlite>=0.19.0"]
 mcp = ["fastmcp>=2.11.3","mcp>=1.13.0"]
@@ -137,6 +142,19 @@ all_publishers = [
     "redis>=4.2",
     "aiokafka>=0.8.0",
     "aio-pika>=9.0.0",
+]
+
+# Every other extra at once, for development and CI. The two Claude cloud
+# backends cost nothing to include: google-genai already pulls google-auth and
+# cloud-storage pulls boto3, so the resolved set is identical with or without
+# them. Verified with `uv pip compile --extra all`.
+all = [
+    "10xscale-agentflow[google-genai,openai,realtime,mcp]",
+    "10xscale-agentflow[anthropic,anthropic-vertex,anthropic-bedrock]",
+    "10xscale-agentflow[pg_checkpoint,sqlite_checkpoint]",
+    "10xscale-agentflow[qdrant,mem0]",
+    "10xscale-agentflow[all_publishers,observability]",
+    "10xscale-agentflow[images,cloud-storage,a2a_sdk]",
 ]
 
 [tool.setuptools.packages.find]

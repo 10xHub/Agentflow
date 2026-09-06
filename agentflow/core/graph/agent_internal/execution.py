@@ -487,7 +487,7 @@ class AgentExecutionMixin:
         assert last_exc is not None  # noqa: S101
         raise last_exc
 
-    async def _call_llm(
+    async def _call_llm(  # noqa: PLR0911
         self,
         messages: list[dict[str, Any]],
         tools: list | None = None,
@@ -553,7 +553,55 @@ class AgentExecutionMixin:
         if self.provider == "google":
             return await self._call_google(messages, tools, stream, **kwargs)
 
+        if self.provider == "anthropic":
+            return await self._call_anthropic(messages, tools, stream, **kwargs)
+
         raise ValueError(f"Unsupported provider: {self.provider}")
+
+    async def count_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Count the input tokens a request would consume, before sending it.
+
+        Uses the provider's own counting endpoint, so the number accounts for
+        the system prompt, tool schemas, and content blocks exactly as the real
+        request would encode them. Useful for budgeting a call, deciding whether
+        to trim context, or estimating cost up front.
+
+        Args:
+            messages: Messages in agentflow's internal (OpenAI-shaped) dialect.
+            tools: Optional tool definitions, which are part of the counted input.
+            **kwargs: Extra request parameters, matching ``_call_llm``.
+
+        Returns:
+            The input token count.
+
+        Note:
+            Coverage differs by provider. Anthropic's endpoint counts messages,
+            the system prompt, and tool schemas. Google's counts ``contents``
+            only, since its endpoint takes no system instruction or tools, so
+            the total is lower than what the request will actually bill.
+
+        Raises:
+            NotImplementedError: If the active provider exposes no server-side
+                token counting endpoint.
+        """
+        if self.provider == "anthropic":
+            return await self._count_tokens_anthropic(messages, tools, **kwargs)
+
+        if self.provider == "google":
+            return await self._count_tokens_google(messages, tools, **kwargs)
+
+        raise NotImplementedError(
+            f"Provider '{self.provider}' has no server-side token counting "
+            "endpoint, so an exact count is not available. 'anthropic' and "
+            "'google' support Agent.count_tokens(); OpenAI does not expose one. "
+            "Read usage from the response after the call instead, or count "
+            "client-side with the tokenizer matching your model."
+        )
 
     async def execute(
         self,

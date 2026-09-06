@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from agentflow.core.llm.client_factory import create_llm_client, detect_provider
+from agentflow.core.llm.client_factory import create_llm_client, resolve_provider_and_model
 
 
 logger = logging.getLogger("agentflow.llm.caller")
@@ -70,8 +70,27 @@ async def call_llm(
         ``(text, input_tokens, output_tokens, cache_read_tokens)`` — plain tuple.
         Token counts are 0 when the provider does not report them.
     """
-    provider = detect_provider(model, use_vertex_ai=use_vertex_ai)
-    client = create_llm_client(provider, use_vertex_ai=use_vertex_ai)
+    # resolve_provider_and_model (not detect_provider) so a recognised
+    # ``provider/`` prefix is stripped before the name reaches the SDK. Sending
+    # "gemini/gemini-2.5-flash" or "anthropic/claude-opus-5" verbatim fails.
+    provider, model = resolve_provider_and_model(model, use_vertex_ai=use_vertex_ai)
+    client = create_llm_client(
+        provider,
+        use_vertex_ai=use_vertex_ai,
+        anthropic_backend=llm_kwargs.pop("anthropic_backend", None),
+    )
+
+    if provider == "anthropic":
+        return await _call_anthropic(
+            client,
+            model,
+            prompt,
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            json_mode=json_mode,
+            **llm_kwargs,
+        )
 
     if provider == "google":
         return await _call_google(
@@ -106,6 +125,71 @@ async def call_llm(
         json_mode=json_mode,
         **llm_kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Anthropic
+# ---------------------------------------------------------------------------
+
+
+async def _call_anthropic(
+    client: Any,
+    model: str,
+    prompt: str,
+    *,
+    system_prompt: str | None,
+    max_tokens: int,
+    temperature: float,
+    json_mode: bool,
+    **llm_kwargs: Any,
+) -> tuple[str, int, int, int]:
+    from agentflow.core.graph.agent_internal.anthropic_request import strip_bedrock_prefix
+    from agentflow.core.graph.agent_internal.constants import ANTHROPIC_NO_SAMPLING_MODELS
+
+    call_kwargs: dict[str, Any] = dict(llm_kwargs)
+    call_kwargs["max_tokens"] = max_tokens
+
+    # Current Claude models reject temperature with a 400. call_llm defaults it
+    # to 0.3 for every caller, so it has to be dropped rather than forwarded.
+    if strip_bedrock_prefix(model) not in ANTHROPIC_NO_SAMPLING_MODELS:
+        call_kwargs["temperature"] = temperature
+
+    if system_prompt:
+        call_kwargs["system"] = system_prompt
+
+    if json_mode:
+        # Anthropic has no response_mime_type; steer with an instruction, which
+        # is what the Messages API supports without a full JSON schema.
+        suffix = "\n\nRespond with valid JSON only, no prose and no code fences."
+        call_kwargs["system"] = (call_kwargs.get("system") or "") + suffix
+
+    response = await client.messages.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        **call_kwargs,
+    )
+
+    if getattr(response, "stop_reason", None) == "refusal":
+        details = getattr(response, "stop_details", None)
+        logger.warning(
+            "Anthropic refused the request (category=%s)",
+            getattr(details, "category", None),
+        )
+
+    text = ""
+    for block in getattr(response, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            text += getattr(block, "text", "") or ""
+
+    usage = getattr(response, "usage", None)
+    inp = getattr(usage, "input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    cache = getattr(usage, "cache_read_input_tokens", 0) or 0
+
+    if cache:
+        logger.debug("Cache hit: %d cached tokens (Anthropic)", cache)
+
+    return text.strip(), inp, out, cache
 
 
 # ---------------------------------------------------------------------------
