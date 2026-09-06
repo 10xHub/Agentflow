@@ -55,6 +55,9 @@ Use these repo-specific notes to be productive quickly when generating code, doc
 - **Examples**: Most examples require an LLM API key (e.g., `OPENAI_API_KEY`) set in `.env` and a valid model string for your chosen provider.
 
 ## Optional integrations (extras in `pyproject.toml`)
+- `openai`, `google-genai`, `anthropic`: provider SDKs. Anthropic adds `anthropic-vertex` and
+  `anthropic-bedrock` for Claude on Vertex AI / Bedrock, selected with `anthropic_backend`.
+- `all`: every other extra at once, for development and CI.
 - `pg_checkpoint`: Postgres (`asyncpg`) + Redis cache (`redis`); use `checkpointer.PgCheckpointer`.
 - `mcp`: Model Context Protocol (FastMCP + mcp); pass an MCP client to `ToolNode`.
 - `composio`, `langchain`: adapters for external tool registries via `ToolNode`.

@@ -37,7 +37,7 @@ The importable package is `agentflow/agentflow/`. Top-level subpackages:
 |---|---|
 | `core/` | The engine. `graph/` (StateGraph, Agent, ToolNode, CompiledGraph, Node, Edge), `state/` (AgentState, Message, content blocks, reducers, context managers), `llm/` (provider detection + client factory + `call_llm`), `skills/` (dynamic skill injection), `exceptions/` |
 | `storage/` | `checkpointer/` (InMemory, Pg), `store/` (vector/long-term memory: Qdrant, Mem0, embeddings), `media/` (multimodal media processing, offload, resolvers, stores) |
-| `runtime/` | `adapters/llm/` (OpenAI / OpenAI-Responses / Google GenAI response converters), `publisher/` (Console, Redis, Kafka, RabbitMQ, OTEL, Composite), `protocols/` (a2a, acp) |
+| `runtime/` | `adapters/llm/` (OpenAI / OpenAI-Responses / Google GenAI / Anthropic response converters), `publisher/` (Console, Redis, Kafka, RabbitMQ, OTEL, Composite), `protocols/` (a2a, acp) |
 | `prebuilt/` | `agent/` (React, RAG, PlanActReflect, SupervisorTeam, Swarm, StructuredOutput), `tools/` (calculator, fetch, files, handoff, memory, search) |
 | `qa/` | `evaluation/` (criteria, datasets, evaluator, reporters, simulators) and `testing/` (TestAgent, mocks, quick tests) |
 | `utils/` | constants (START/END/ResponseGranularity), `tool` decorator, `convert_messages`, callbacks, validators, id generators, background tasks, graceful shutdown |
@@ -175,7 +175,7 @@ already present.
 .venv/bin/python -m pytest tests/graph   # one area
 ruff check . && ruff format .            # lint + format (line-length 100, py312)
 # editable install with extras for local dev:
-pip install -e ".[google-genai,openai,mcp,pg_checkpoint]"
+pip install -e ".[google-genai,openai,anthropic,mcp,pg_checkpoint]"
 ```
 
 - Tests live in `tests/` (mirrors package layout: `graph/`, `state/`, `storage/`, `store/`,
@@ -194,8 +194,6 @@ pip install -e ".[google-genai,openai,mcp,pg_checkpoint]"
 - **`ToolNode(functions=...)`** keyword is wrong (README MCP example). The param is `tools`.
 - A few `examples/` files still use dead paths (`agentflow.state.message`, `agentflow.graph.tool_node`,
   `agentflow.evaluation.*`). Treat those specific files as broken until fixed.
-- README/docstrings imply native Anthropic support; the LLM factory only builds google/openai
-  clients. See Model strings above.
 
 When you touch any of the above, prefer fixing the doc/example to match the code rather than the
 reverse, unless the export path itself is the bug.

@@ -144,6 +144,19 @@ all_publishers = [
     "aio-pika>=9.0.0",
 ]
 
+# Every other extra at once, for development and CI. The two Claude cloud
+# backends cost nothing to include: google-genai already pulls google-auth and
+# cloud-storage pulls boto3, so the resolved set is identical with or without
+# them. Verified with `uv pip compile --extra all`.
+all = [
+    "10xscale-agentflow[google-genai,openai,realtime,mcp]",
+    "10xscale-agentflow[anthropic,anthropic-vertex,anthropic-bedrock]",
+    "10xscale-agentflow[pg_checkpoint,sqlite_checkpoint]",
+    "10xscale-agentflow[qdrant,mem0]",
+    "10xscale-agentflow[all_publishers,observability]",
+    "10xscale-agentflow[images,cloud-storage,a2a_sdk]",
+]
+
 [tool.setuptools.packages.find]
 include = ["agentflow*"]
 exclude = ["normal_tests*", "tests*", "examples*", "docs*"]
