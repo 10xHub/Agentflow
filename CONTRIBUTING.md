@@ -27,7 +27,7 @@ uv run pre-commit install   # enable the git hooks (optional but recommended)
 If you work on optional subsystems, install the matching extras, e.g.:
 
 ```bash
-uv pip install -e ".[google-genai,openai,mcp,pg_checkpoint]"
+uv pip install -e ".[google-genai,openai,anthropic,mcp,pg_checkpoint]"
 ```
 
 ## Before you open a pull request

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,7 +20,9 @@ from agentflow.core.llm.caller import (
 # Provider dispatch
 # ---------------------------------------------------------------------------
 
-_DETECT = "agentflow.core.llm.caller.detect_provider"
+# call_llm resolves provider *and* model together, so a recognised
+# "provider/" prefix is stripped before the name reaches the SDK.
+_RESOLVE = "agentflow.core.llm.caller.resolve_provider_and_model"
 _CREATE = "agentflow.core.llm.caller.create_llm_client"
 _CALL_GOOGLE = "agentflow.core.llm.caller._call_google"
 _CALL_RESP = "agentflow.core.llm.caller._call_openai_responses"
@@ -31,7 +34,7 @@ _DUMMY = ("text", 10, 5, 0)
 @pytest.mark.anyio
 async def test_google_model_dispatches_to_google():
     with (
-        patch(_DETECT, return_value="google"),
+        patch(_RESOLVE, return_value=("google", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_GOOGLE, new=AsyncMock(return_value=_DUMMY)) as mock,
     ):
@@ -44,7 +47,7 @@ async def test_google_model_dispatches_to_google():
 @pytest.mark.anyio
 async def test_openai_default_dispatches_to_responses():
     with (
-        patch(_DETECT, return_value="openai"),
+        patch(_RESOLVE, return_value=("openai", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_RESP, new=AsyncMock(return_value=_DUMMY)) as mock,
     ):
@@ -57,7 +60,7 @@ async def test_openai_default_dispatches_to_responses():
 @pytest.mark.anyio
 async def test_openai_chat_style_dispatches_to_chat():
     with (
-        patch(_DETECT, return_value="openai"),
+        patch(_RESOLVE, return_value=("openai", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_CHAT, new=AsyncMock(return_value=_DUMMY)) as mock,
     ):
@@ -71,7 +74,7 @@ async def test_openai_chat_style_dispatches_to_chat():
 async def test_openai_responses_style_explicit():
     """Explicitly passing api_style='responses' still hits the Responses path."""
     with (
-        patch(_DETECT, return_value="openai"),
+        patch(_RESOLVE, return_value=("openai", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_RESP, new=AsyncMock(return_value=_DUMMY)) as mock_resp,
         patch(_CALL_CHAT, new=AsyncMock(return_value=_DUMMY)) as mock_chat,
@@ -86,7 +89,7 @@ async def test_openai_responses_style_explicit():
 async def test_api_style_irrelevant_for_google():
     """api_style has no effect when the provider is Google."""
     with (
-        patch(_DETECT, return_value="google"),
+        patch(_RESOLVE, return_value=("google", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_GOOGLE, new=AsyncMock(return_value=_DUMMY)) as mock_google,
         patch(_CALL_CHAT, new=AsyncMock(return_value=_DUMMY)) as mock_chat,
@@ -104,7 +107,7 @@ async def test_api_style_irrelevant_for_google():
 @pytest.mark.anyio
 async def test_system_prompt_forwarded_to_responses():
     with (
-        patch(_DETECT, return_value="openai"),
+        patch(_RESOLVE, return_value=("openai", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_RESP, new=AsyncMock(return_value=_DUMMY)) as mock,
     ):
@@ -118,7 +121,7 @@ async def test_system_prompt_forwarded_to_responses():
 @pytest.mark.anyio
 async def test_system_prompt_forwarded_to_chat():
     with (
-        patch(_DETECT, return_value="openai"),
+        patch(_RESOLVE, return_value=("openai", "test-model")),
         patch(_CREATE, return_value=MagicMock()),
         patch(_CALL_CHAT, new=AsyncMock(return_value=_DUMMY)) as mock,
     ):
@@ -293,3 +296,102 @@ async def test_call_openai_chat_implementation():
     assert kwargs["temperature"] == 0.8
     assert kwargs["response_format"] == {"type": "json_object"}
     assert kwargs["another_param"] == "another_val"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic
+# ---------------------------------------------------------------------------
+
+_CALL_ANTHROPIC = "agentflow.core.llm.caller._call_anthropic"
+
+
+@pytest.mark.anyio
+async def test_claude_model_dispatches_to_anthropic():
+    with (
+        patch(_RESOLVE, return_value=("anthropic", "claude-opus-5")),
+        patch(_CREATE, return_value=MagicMock()),
+        patch(_CALL_ANTHROPIC, new=AsyncMock(return_value=_DUMMY)) as mock,
+    ):
+        result = await call_llm("claude-opus-5", "hello")
+
+    mock.assert_called_once()
+    assert result == _DUMMY
+
+
+@pytest.mark.anyio
+async def test_anthropic_drops_temperature_for_rejecting_models():
+    """call_llm defaults temperature=0.3; current Claude models 400 on it."""
+    from agentflow.core.llm.caller import _call_anthropic
+
+    client = MagicMock()
+    client.messages.create = AsyncMock(
+        return_value=SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="hi")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(input_tokens=3, output_tokens=1, cache_read_input_tokens=0),
+        )
+    )
+
+    await _call_anthropic(
+        client,
+        "claude-opus-5",
+        "hello",
+        system_prompt=None,
+        max_tokens=100,
+        temperature=0.3,
+        json_mode=False,
+    )
+    assert "temperature" not in client.messages.create.call_args.kwargs
+
+
+@pytest.mark.anyio
+async def test_anthropic_keeps_temperature_for_older_models():
+    from agentflow.core.llm.caller import _call_anthropic
+
+    client = MagicMock()
+    client.messages.create = AsyncMock(
+        return_value=SimpleNamespace(content=[], stop_reason="end_turn", usage=None)
+    )
+
+    await _call_anthropic(
+        client,
+        "claude-haiku-4-5",
+        "hello",
+        system_prompt=None,
+        max_tokens=100,
+        temperature=0.3,
+        json_mode=False,
+    )
+    assert client.messages.create.call_args.kwargs["temperature"] == 0.3
+
+
+@pytest.mark.anyio
+async def test_anthropic_returns_text_and_usage():
+    from agentflow.core.llm.caller import _call_anthropic
+
+    client = MagicMock()
+    client.messages.create = AsyncMock(
+        return_value=SimpleNamespace(
+            content=[
+                SimpleNamespace(type="thinking", thinking="ignored"),
+                SimpleNamespace(type="text", text="  answer  "),
+            ],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(
+                input_tokens=42, output_tokens=7, cache_read_input_tokens=30
+            ),
+        )
+    )
+
+    text, inp, out, cache = await _call_anthropic(
+        client,
+        "claude-opus-5",
+        "hello",
+        system_prompt="be terse",
+        max_tokens=100,
+        temperature=0.3,
+        json_mode=False,
+    )
+    assert text == "answer"
+    assert (inp, out, cache) == (42, 7, 30)
+    assert client.messages.create.call_args.kwargs["system"] == "be terse"

@@ -24,6 +24,83 @@ Starting from this release:
 
 ## [Unreleased]
 
+### Added
+
+- **Native Anthropic provider.** `model="claude-opus-5"` (or `"anthropic/..."`,
+  `"claude/..."`) now builds a real Anthropic client instead of silently
+  constructing an `AsyncOpenAI` that failed at request time. Covers non-streaming
+  and streaming, tool calling, multimodal input, reasoning, usage accounting, and
+  retry/fallback. Install with the `anthropic`, `anthropic-vertex`, or
+  `anthropic-bedrock` extra.
+  - Three backends, selected with `anthropic_backend`: `None` (direct Claude API),
+    `"vertex"` (`AsyncAnthropicVertex`), `"bedrock"`
+    (`AsyncAnthropicBedrockMantle`, the Messages-API endpoint). Bedrock model ids
+    keep their `anthropic.` prefix.
+  - `max_tokens` is required by the API and is defaulted automatically (16000
+    non-streaming, 64000 streaming).
+  - `temperature`/`top_p`/`top_k` are stripped for models that reject them with a
+    400, per model rather than as a blanket strip.
+  - `reasoning_config={"effort": ...}` maps to `thinking={"type": "adaptive"}`
+    plus `output_config.effort`. `budget_tokens` is never emitted: it returns a
+    400 on current Claude models.
+  - A trailing assistant turn is dropped, since prefill returns a 400 on current
+    models. This specifically protects the injected `context_summary`.
+  - A policy `refusal` is a successful HTTP 200 with a possibly-empty `content`;
+    it is surfaced as a message with `metadata["refusal"]` rather than being
+    treated as a transient failure that burns the model fallback list.
+- **`Agent.count_tokens(messages, tools)`.** Counts a request's input tokens
+  before sending it, using the provider's own endpoint and the exact payload the
+  real call would send (system prompt, tool schemas, merged tool results). Only
+  Anthropic exposes a server-side counting endpoint today; other providers raise
+  `NotImplementedError` rather than returning a guess.
+- **Anthropic prompt caching.** `anthropic_cache=True` (or a dict such as
+  `{"type": "ephemeral", "ttl": "1h"}`) places `cache_control` breakpoints at the
+  end of the stable request prefix: the last tool and the last system block,
+  since render order is tools -> system -> messages. Skipped when the caller
+  placed their own breakpoints. Verify hits with
+  `usage.cache_read_input_tokens`; a prefix under ~1024 tokens silently does not
+  cache.
+- **Anthropic server tools.** `web_search_tool()`, `web_fetch_tool()`, and
+  `code_execution_tool()` build correctly-dated definitions, picking the
+  dynamic-filtering variant on models that support it and the basic variant
+  otherwise. Server-tool result blocks are captured into
+  `metadata["server_tool_results"]`, and a `server_tool_use` block is recorded
+  without being added to `tools_calls` so the graph does not re-run work
+  Anthropic already did. A server-tool error arrives as a normal HTTP 200 with an
+  error object rather than raising, and is surfaced as `error_code`.
+  `stop_reason: "pause_turn"` is flagged as `metadata["pause_turn"]`.
+- **`AnthropicBatch`** (`agentflow.core.llm.AnthropicBatch`) for the Message
+  Batches API: build, submit, poll, and collect. Results are keyed by
+  `custom_id` throughout, because batch results arrive in any order.
+- **`call_llm` supports Anthropic**, so `SummaryContextManager`, the evaluation
+  judge, and `UserSimulator` all work with Claude models.
+
+### Fixed
+
+- **`use_vertex_ai=True` hijacked Claude models.** The flag short-circuited
+  provider detection to `"google"` before the model name was examined, so
+  `Agent(model="claude-opus-5", use_vertex_ai=True)` built a Google GenAI client
+  with a Claude model name and failed at request time. Claude runs on Vertex too,
+  and `use_vertex_ai` is the flag a caller naturally reaches for, so it now acts
+  as a backend selector for Anthropic (equivalent to
+  `anthropic_backend="vertex"`) instead of a provider override. An explicit
+  `anthropic_backend` still wins. Behaviour for every non-Claude model is
+  unchanged.
+- **`call_llm` sent unrecognised model prefixes to the SDK verbatim.** It used
+  `detect_provider`, which selects a provider but does not strip the prefix, so
+  `call_llm("gemini/gemini-2.5-flash", ...)` passed the full string as the model
+  name. It now uses `resolve_provider_and_model`.
+
+### Breaking
+
+- **`anthropic/` and `claude/` are now recognised model prefixes.** Previously
+  they were unknown prefixes that fell through to the OpenAI provider, which was
+  how Claude-behind-an-OpenAI-compatible-proxy worked. `Agent(model=
+  "anthropic/claude-3")` now selects the native Anthropic provider and strips the
+  prefix. **Migration:** pass `provider="openai"` explicitly to keep routing
+  through an OpenAI-compatible endpoint:
+  `Agent(model="anthropic/claude-3", provider="openai", base_url=...)`.
+
 ## [1.0.0] - 2026-07-19
 
 First stable release. The public API is now covered by the deprecation policy above,

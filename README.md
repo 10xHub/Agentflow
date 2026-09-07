@@ -100,23 +100,26 @@ Provider SDKs and infrastructure integrations are optional extras — install on
 
 | Extra | Adds |
 |---|---|
-| `google-genai`, `openai` | Provider SDK adapters |
+| `google-genai`, `openai`, `anthropic` | Provider SDK adapters |
+| `anthropic-vertex`, `anthropic-bedrock` | Claude on Vertex AI or Amazon Bedrock |
 | `realtime` | Audio-to-audio agents over Gemini Live |
 | `mcp` | Model Context Protocol client and tools |
 | `pg_checkpoint`, `sqlite_checkpoint` | Durable checkpointing (Postgres + Redis, or SQLite) |
 | `qdrant`, `mem0` | Long-term vector memory stores |
 | `redis`, `kafka`, `rabbitmq`, `otel` | Event publishers and tracing |
 | `images`, `cloud-storage` | Multimodal media handling and offload |
+| `all` | Every extra above at once, for development and CI |
 
 ```bash
-pip install "10xscale-agentflow[google-genai,openai,mcp,pg_checkpoint]"
+pip install "10xscale-agentflow[google-genai,openai,anthropic,mcp,pg_checkpoint]"
 ```
 
 Then set your provider key. A `.env` file in the working directory is loaded automatically.
 
 ```bash
-export GEMINI_API_KEY=...     # Google Gemini
-export OPENAI_API_KEY=sk-...  # OpenAI, or any OpenAI-compatible endpoint
+export GEMINI_API_KEY=...        # Google Gemini
+export OPENAI_API_KEY=sk-...     # OpenAI, or any OpenAI-compatible endpoint
+export ANTHROPIC_API_KEY=sk-...  # Anthropic Claude
 ```
 
 ---

@@ -403,6 +403,31 @@ class AgentGoogleMixin:
             logger.debug("Cache hit: %d cached tokens (Google)", cached)
         return response
 
+    async def _count_tokens_google(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list | None = None,
+        **kwargs: Any,
+    ) -> int:
+        """Count input tokens via the Google GenAI ``count_tokens`` endpoint.
+
+        Counted against the same converted ``contents`` the real request would
+        send, so multimodal parts and tool-call history are included rather than
+        estimated.
+
+        Note:
+            Google counts ``contents``; the system instruction and tool schemas
+            are not part of this endpoint's request shape, so they are excluded
+            from the total. Anthropic's equivalent does include them.
+        """
+        _system_instruction, google_contents = self._convert_to_google_format(messages)
+
+        response = await self.client.aio.models.count_tokens(
+            model=self.model,
+            contents=google_contents,
+        )
+        return getattr(response, "total_tokens", 0) or 0
+
     async def _call_google(
         self,
         messages: list[dict[str, Any]],

@@ -60,11 +60,17 @@ class ModelResponseConverter:
                 self.converter = GoogleGenAIConverter()
                 logger.debug("Using GoogleGenAIConverter for response conversion")
 
+            elif converter == "anthropic":
+                from .anthropic_converter import AnthropicConverter
+
+                self.converter = AnthropicConverter()
+                logger.debug("Using AnthropicConverter for response conversion")
+
             else:
                 logger.error(f"Unsupported converter: {converter}")
                 raise ValueError(
                     f"Unsupported converter: {converter}. "
-                    "Supported: 'openai', 'openai_responses', 'google'"
+                    "Supported: 'openai', 'openai_responses', 'google', 'anthropic'"
                 )
 
         elif isinstance(converter, BaseConverter):

@@ -12,6 +12,7 @@ from agentflow.core.llm.client_factory import (
 )
 
 from .constants import (
+    ANTHROPIC_OUTPUT_TYPES,
     CLIENT_CONSTRUCTOR_KWARGS,
     GOOGLE_OUTPUT_TYPES,
     OPENAI_OUTPUT_TYPES,
@@ -51,6 +52,14 @@ class AgentProviderMixin:
                 f"Supported: {list(OPENAI_OUTPUT_TYPES)}"
             )
 
+        if self.provider == "anthropic" and self.output_type not in ANTHROPIC_OUTPUT_TYPES:
+            raise ValueError(
+                f"Anthropic provider doesn't support output_type='{self.output_type}'. "
+                f"Supported: {list(ANTHROPIC_OUTPUT_TYPES)}. Anthropic's Messages API "
+                "generates text and tool calls only; there is no image/audio/video "
+                "generation endpoint."
+            )
+
         logger.debug("%s provider supports output_type='%s'", self.provider, self.output_type)
 
     def _detect_provider_from_model(self, model: str, use_vertex_ai: bool = False) -> str:
@@ -80,6 +89,26 @@ class AgentProviderMixin:
     ) -> Any:
         """Create a native SDK client for the selected provider."""
         api_key = self.llm_kwargs.get("api_key")
+        if provider == "anthropic":
+            # Anthropic's constructors reject the OpenAI-shaped allowlist, so the
+            # factory does its own per-backend filtering; pass llm_kwargs through.
+            # use_vertex_ai is honoured as a backend selector so the flag means
+            # the same thing for Claude as it does for Gemini.
+            backend = self.llm_kwargs.get("anthropic_backend")
+            if backend is None and use_vertex_ai:
+                backend = "vertex"
+            return create_llm_client(
+                provider,
+                base_url=base_url,
+                api_key=api_key,
+                anthropic_backend=backend,
+                **{
+                    k: v
+                    for k, v in self.llm_kwargs.items()
+                    if k not in ("api_key", "anthropic_backend", "base_url")
+                },
+            )
+
         extra = {k: v for k, v in self.llm_kwargs.items() if k in CLIENT_CONSTRUCTOR_KWARGS}
         return create_llm_client(
             provider,
