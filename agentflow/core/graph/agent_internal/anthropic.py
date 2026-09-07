@@ -89,6 +89,14 @@ def apply_reasoning_config(
 class AgentAnthropicMixin:
     """Anthropic Messages API request helpers."""
 
+    # Instance attributes set by BaseAgent.__init__ (model, llm_kwargs) and
+    # Agent.__init__ (client). Declared here so the mixin type-checks on its own;
+    # reasoning_config and output_schema are read with getattr because they are
+    # optional on the concrete agent.
+    model: str
+    client: Any
+    llm_kwargs: dict[str, Any]
+
     def _build_anthropic_request(
         self,
         messages: list[dict[str, Any]],
