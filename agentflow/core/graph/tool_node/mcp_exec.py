@@ -16,6 +16,8 @@ from agentflow.runtime.publisher.events import ContentType, Event, EventModel, E
 from agentflow.runtime.publisher.publish import publish_event
 from agentflow.utils import CallbackContext, CallbackManager, InvocationType
 
+from ._helpers import _normalize_resource_uri
+
 
 logger = logging.getLogger("agentflow.graph.tool_node")
 
@@ -38,12 +40,7 @@ class MCPMixin:
             except (TypeError, OverflowError):
                 if hasattr(obj, "model_dump"):
                     dumped = obj.model_dump()  # type: ignore
-                    if isinstance(dumped, dict) and dumped.get("type") == "resource":
-                        resource = dumped.get("resource", {})
-                        if isinstance(resource, dict) and "uri" in resource:
-                            resource["uri"] = str(resource["uri"])
-                            dumped["resource"] = resource
-                    return dumped
+                    return _normalize_resource_uri(dumped)
                 return {"content": str(obj), "type": "fallback"}
 
         for source in [
