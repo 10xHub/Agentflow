@@ -69,6 +69,7 @@ class AnthropicBatch:
         """
         from agentflow.core.graph.agent_internal.anthropic_request import (
             convert_tools,
+            drop_trailing_assistant,
             merge_tool_results,
             split_system,
         )
@@ -78,6 +79,10 @@ class AnthropicBatch:
 
         system, remainder = split_system(messages)
         remainder = merge_tool_results(remainder)
+        # Same guard the live request path applies: an assistant-prefill turn is
+        # a 400, and dropping the only remaining turn would leave nothing to
+        # send at all.
+        remainder = drop_trailing_assistant(remainder)
 
         body: dict[str, Any] = {
             "model": self.model,
