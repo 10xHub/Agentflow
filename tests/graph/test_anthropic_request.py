@@ -326,3 +326,26 @@ class TestDropTrailingAssistant:
         result = drop_trailing_assistant(messages)
         assert len(result) == 2
         assert result[0]["content"] == "earlier"
+
+    def test_dropping_the_only_turn_never_empties_the_conversation(self):
+        """The summary turn is the *only* turn once ``state.context`` is empty.
+
+        ``convert_messages`` injects ``state.context_summary`` as an assistant
+        message, so a summarised-and-trimmed conversation is exactly
+        ``[system, assistant(summary)]``. Dropping the prefill must not leave the
+        request with an empty ``messages`` list, which the API rejects.
+        """
+        messages = [{"role": "assistant", "content": "summary"}]
+        result = drop_trailing_assistant(messages)
+        assert result, "dropping the prefill must not empty the conversation"
+        assert all(m.get("role") != "assistant" for m in result)
+
+    def test_system_prompt_is_not_the_only_turn_either(self):
+        """``split_system`` runs first, so this reaches us as a lone assistant."""
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "summary"},
+        ]
+        _, remainder = split_system(messages)
+        result = drop_trailing_assistant(remainder)
+        assert result, "a system prompt alone is not a sendable conversation"
