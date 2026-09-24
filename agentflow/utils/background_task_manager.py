@@ -266,6 +266,17 @@ class BackgroundTaskManager:
                 )
             else:
                 await asyncio.gather(*self._tasks, return_exceptions=return_exceptions)
+
+            # gather() resolves as soon as every task is done, but the cleanup for each
+            # one is a done-callback scheduled with call_soon -- it has not run yet when
+            # gather returns. Without yielding once here, `_tasks` and `_task_metadata`
+            # still hold every finished task on return, so a caller reading
+            # pending_count / get_task_count() right after this sees a stale non-zero
+            # count. The callbacks must be allowed to run rather than discarded here:
+            # they also emit the completion/failure metrics and the exception log, and
+            # dropping the entries first would turn those into "unknown" / 0.0s.
+            await asyncio.sleep(0)
+
             logger.info("All background tasks finished.")
         except TimeoutError:
             logger.warning("Timeout waiting for background tasks, some may still be running")
