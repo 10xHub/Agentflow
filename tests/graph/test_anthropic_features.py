@@ -217,6 +217,23 @@ class TestBatch:
         assert body["system"] == [{"type": "text", "text": "sys"}]
         assert body["messages"] == [{"role": "user", "content": "q"}]
 
+    def test_add_never_leaves_a_trailing_assistant(self):
+        """The live path drops prefills; the batch path must agree.
+
+        ``convert_messages`` emits ``state.context_summary`` as an assistant
+        message, so a summarised-and-trimmed conversation is
+        ``[system, assistant(summary)]``. Sending that verbatim is a 400, and it
+        is also inconsistent with what the non-batch path now produces.
+        """
+        batch = self._batch()
+        batch.add(
+            "row-1",
+            [{"role": "system", "content": "sys"}, {"role": "assistant", "content": "summary"}],
+        )
+        body = batch.requests[0]["params"]
+        assert body["messages"], "an empty message list is not a sendable request"
+        assert all(m.get("role") != "assistant" for m in body["messages"])
+
     def test_max_tokens_is_defaulted(self):
         batch = self._batch()
         batch.add("row-1", [{"role": "user", "content": "q"}])
