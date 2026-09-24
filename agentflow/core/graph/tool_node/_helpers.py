@@ -35,7 +35,13 @@ def _stable_members(obj: set | frozenset) -> list:
 # does not lose precision on the way to the model.
 _JSON_ENCODERS: tuple[tuple[t.Any, t.Callable[[t.Any], t.Any]], ...] = (
     ((dt.datetime, dt.date, dt.time), lambda o: o.isoformat()),
-    ((uuid.UUID, pathlib.PurePath), str),
+    # A path renders with POSIX separators, not str(): str() emits a backslash on
+    # Windows, which both breaks the URI the model is meant to reuse and makes the
+    # same tool return different text per platform. `prebuilt/tools/files.py` already
+    # returns `as_posix()`, so this matches the convention the rest of the package
+    # sets. UUID stays on its own rule: it is not a PurePath and has no as_posix().
+    (pathlib.PurePath, lambda o: o.as_posix()),
+    (uuid.UUID, str),
     (decimal.Decimal, str),
     (enum.Enum, lambda o: o.value),
     ((set, frozenset), _stable_members),
@@ -61,6 +67,22 @@ def _json_default(obj: t.Any) -> t.Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def _normalize_resource_uri(dumped: t.Any) -> t.Any:
+    """Render a resource ``uri`` with forward slashes, in place.
+
+    A URI is defined with forward slashes, but ``str(Path)`` emits a backslash on
+    Windows. Left alone, the model is handed a URI it cannot reuse and the same tool
+    returns different text on each platform.
+    """
+    if isinstance(dumped, dict) and dumped.get("type") == "resource":
+        resource = dumped.get("resource", {})
+        if isinstance(resource, dict) and "uri" in resource:
+            uri = resource["uri"]
+            resource["uri"] = uri.as_posix() if isinstance(uri, pathlib.PurePath) else str(uri)
+            dumped["resource"] = resource
+    return dumped
+
+
 def _safe_serialize(obj: t.Any) -> dict[str, t.Any]:
     try:
         json.dumps(obj)
@@ -68,12 +90,7 @@ def _safe_serialize(obj: t.Any) -> dict[str, t.Any]:
     except (TypeError, OverflowError):
         if hasattr(obj, "model_dump"):
             dumped = obj.model_dump()  # type: ignore
-            if isinstance(dumped, dict) and dumped.get("type") == "resource":
-                resource = dumped.get("resource", {})
-                if isinstance(resource, dict) and "uri" in resource:
-                    resource["uri"] = str(resource["uri"])
-                    dumped["resource"] = resource
-            return dumped
+            return _normalize_resource_uri(dumped)
 
         # Retry with the scalar renderer so a container keeps its shape and only the
         # offending leaves become text. Without this a single datetime collapses the

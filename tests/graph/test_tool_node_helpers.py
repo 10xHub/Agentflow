@@ -1,7 +1,7 @@
 import enum
 from datetime import date, datetime, time
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from uuid import UUID
 
 from agentflow.core.graph.tool_node._helpers import (
@@ -94,6 +94,40 @@ class TestSafeSerializeScalarFormatting:
     def test_nested_containers_are_walked(self):
         out = _safe_serialize({"rows": [{"when": datetime(2026, 1, 15, 9, 30)}]})
         assert out == {"rows": [{"when": "2026-01-15T09:30:00"}]}
+
+    def test_windows_path_renders_with_forward_slashes(self):
+        """A path must serialize identically on every platform.
+
+        ``str()`` emits a backslash on Windows, so a tool that returns a Path would
+        hand the model different text depending on where it ran -- and a URI built
+        from it would not resolve. ``PureWindowsPath`` is used deliberately so this
+        assertion fails on Linux too, rather than only on the platform that has the
+        bug.
+        """
+        out = _safe_serialize({"path": PureWindowsPath(r"C:\data\x")})
+        assert out == {"path": "C:/data/x"}
+
+    def test_resource_uri_renders_with_forward_slashes(self):
+        """The ``model_dump`` branch bypasses the JSON retry, so it needs its own fix."""
+
+        class _Dump:
+            def model_dump(self):
+                return {
+                    "type": "resource",
+                    "resource": {"uri": PureWindowsPath(r"\\srv\share\a.json")},
+                }
+
+        out = _safe_serialize(_Dump())
+        assert out["resource"]["uri"] == "//srv/share/a.json"
+
+    def test_non_path_resource_uri_keeps_str_rendering(self):
+        """Only paths are normalized; an already-string URI must pass through."""
+
+        class _Dump:
+            def model_dump(self):
+                return {"type": "resource", "resource": {"uri": "file:///tmp/a.json"}}
+
+        assert _safe_serialize(_Dump())["resource"]["uri"] == "file:///tmp/a.json"
 
     def test_sets_become_sorted_lists(self):
         """Set iteration order is not stable, so unordered output would flap per run."""
