@@ -168,6 +168,61 @@ class TestToolNode:
         assert isinstance(result, Message)
 
     @pytest.mark.asyncio
+    async def test_invoke_missing_required_argument_returns_a_failed_tool_result(self):
+        """A call missing a required argument is the model's mistake to correct: it must
+        come back as a failed tool result, not fail the whole graph run."""
+        called = []
+
+        def sample_tool(x: int, y: str = "test") -> str:
+            called.append(x)
+            return f"result_{x}_{y}"
+
+        tool_node = ToolNode([sample_tool])
+
+        result = await tool_node.invoke(
+            name="sample_tool",
+            args={"y": "hello"},
+            tool_call_id="call_missing_x",
+            config={},
+            state=AgentState(),
+            callback_manager=CallbackManager(),
+        )
+
+        assert isinstance(result, Message)
+        block = next(b for b in result.content if isinstance(b, ToolResultBlock))
+        assert block.status == "failed"
+        assert block.is_error is True
+        assert "Missing required parameter 'x'" in str(block.output)
+        assert called == []
+
+    @pytest.mark.asyncio
+    async def test_invoke_missing_required_argument_reaches_the_error_callback(self):
+        """The on-error callback sees the model's raw arguments and may recover the call."""
+
+        def sample_tool(x: int) -> str:
+            return str(x)
+
+        tool_node = ToolNode([sample_tool])
+        recovered = Message.text_message("recovered")
+        callback_mgr = MagicMock(spec=CallbackManager)
+        callback_mgr.execute_on_error = AsyncMock(return_value=recovered)
+
+        result = await tool_node.invoke(
+            name="sample_tool",
+            args={"z": 1},
+            tool_call_id="call_missing_x",
+            config={},
+            state=AgentState(),
+            callback_manager=callback_mgr,
+        )
+
+        assert result is recovered
+        _, input_data, error = callback_mgr.execute_on_error.await_args.args
+        assert input_data == {"z": 1}
+        assert isinstance(error, TypeError)
+        callback_mgr.execute_before_invoke.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_invoke_local_tool_return_types(self):
         """Test different return types from local tools."""
 
