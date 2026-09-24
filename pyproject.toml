@@ -228,6 +228,7 @@ max-complexity = 10
 [tool.ruff.lint.per-file-ignores]
 "bin/*.py" = ["E402", "S603", "T201", "S101"]
 "*/tests/*.py" = ["E402", "S603", "T201", "S101","PLR2004"]
+"tests/**/*.py" = ["E402", "S603", "T201", "S101", "PLR2004"]
 "*/test/*.py" = ["E402", "S603", "T201", "S101"]
 "scripts/*.py" = ["E402", "S603", "T201", "S101", "INP001"]
 "*/__init__.py" = ["E402", "S603", "T201", "S101"]

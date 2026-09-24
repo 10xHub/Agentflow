@@ -377,11 +377,25 @@ def drop_trailing_assistant(messages: list[dict[str, Any]]) -> list[dict[str, An
     specifically because agentflow injects ``state.context_summary`` as an
     assistant message, which becomes the trailing turn whenever ``state.context``
     is empty.
+
+    Dropping that turn must not leave the request with no messages at all, so
+    when it is the *only* turn it is demoted to a ``user`` turn instead of being
+    discarded: the summary survives as context and the request stays sendable.
+    Losing it silently would send the model an empty conversation.
     """
-    if messages and messages[-1].get("role") == "assistant":
+    if not messages or messages[-1].get("role") != "assistant":
+        return messages
+
+    if len(messages) == 1:
         logger.debug(
-            "Dropping trailing assistant message: Anthropic rejects assistant "
-            "prefills with a 400 on current models."
+            "Demoting the lone trailing assistant message to a user turn: "
+            "Anthropic rejects assistant prefills, but an empty message list is "
+            "not a sendable request either."
         )
-        return messages[:-1]
-    return messages
+        return [{**messages[0], "role": "user"}]
+
+    logger.debug(
+        "Dropping trailing assistant message: Anthropic rejects assistant "
+        "prefills with a 400 on current models."
+    )
+    return messages[:-1]

@@ -145,6 +145,72 @@ class TestBackgroundTaskManager:
             # This is expected behavior with asyncio.gather when one task fails
 
     @pytest.mark.asyncio
+    async def test_wait_for_all_leaves_no_residue(self, task_manager):
+        """wait_for_all() must return with the bookkeeping already cleaned up.
+
+        ``asyncio.gather`` resolves the moment the last task finishes, but each task's
+        ``add_done_callback`` cleanup is queued with ``call_soon`` and has not run yet.
+        Returning at that point leaves every finished task in ``_tasks`` and
+        ``_task_metadata``, so a caller reading ``pending_count`` immediately after
+        sees a stale non-zero value. The burst-then-pause shape is what exposes it:
+        earlier bursts get their callbacks drained by the pause, the final burst does
+        not, so exactly one burst's worth is left behind.
+        """
+        for _ in range(5):
+            for _ in range(20):
+
+                async def job():
+                    await asyncio.sleep(0.001)
+
+                task_manager.create_task(job())
+            await asyncio.sleep(0.01)
+
+        await task_manager.wait_for_all()
+
+        assert task_manager.pending_count == 0
+        assert task_manager.get_task_count() == 0
+        assert task_manager._task_metadata == {}
+
+    @pytest.mark.asyncio
+    async def test_wait_for_all_timeout_leaves_no_residue(self, task_manager):
+        """The timeout path waits for real work, so it must not report residue either."""
+        for _ in range(5):
+            for _ in range(20):
+
+                async def job():
+                    await asyncio.sleep(0.001)
+
+                task_manager.create_task(job())
+            await asyncio.sleep(0.01)
+
+        await task_manager.wait_for_all(timeout=15)
+
+        assert task_manager.pending_count == 0
+        assert task_manager._task_metadata == {}
+
+    @pytest.mark.asyncio
+    async def test_shutdown_reports_accurate_completion_counts(self, task_manager):
+        """shutdown() derives completed_tasks from len(_tasks) after gather.
+
+        ``cancel_all`` already awaits, which incidentally drains the done-callbacks,
+        so this passes either way today. It is here to pin the reported statistics so
+        a future change to that scheduling cannot silently make them lie.
+        """
+
+        async def job():
+            await asyncio.sleep(0.001)
+
+        for _ in range(10):
+            task_manager.create_task(job())
+
+        stats = await task_manager.shutdown()
+
+        assert stats["status"] == "completed"
+        assert stats["initial_tasks"] == 10
+        assert stats["completed_tasks"] == 10
+        assert stats["remaining_tasks"] == 0
+
+    @pytest.mark.asyncio
     async def test_high_load_concurrent_tasks(self, task_manager):
         """Test BackgroundTaskManager under high load with many concurrent tasks."""
         num_tasks = 100

@@ -185,17 +185,9 @@ class LocalExecMixin:
         )
 
         fn = self._funcs[name]
-        input_data = self._prepare_input_data_tool(
-            fn,
-            name,
-            args,
-            {
-                "tool_call_id": tool_call_id,
-                "state": state,
-                "config": config,
-                "emit": emit,
-            },
-        )
+        # The model's raw arguments until they are validated, so an error callback still has
+        # what was asked for when validation is what failed.
+        input_data: dict[str, t.Any] = dict(args)
 
         meta = {
             "function_name": name,
@@ -219,6 +211,20 @@ class LocalExecMixin:
         publish_event(event)
 
         try:
+            # Inside the try: a call missing a required argument is the model's mistake to
+            # correct, so it comes back as a failed tool result like any other tool error,
+            # rather than failing the whole graph run.
+            input_data = self._prepare_input_data_tool(
+                fn,
+                name,
+                args,
+                {
+                    "tool_call_id": tool_call_id,
+                    "state": state,
+                    "config": config,
+                    "emit": emit,
+                },
+            )
             input_data = await callback_mgr.execute_before_invoke(context, input_data)
 
             event.event_type = EventType.UPDATE
